@@ -335,6 +335,12 @@ create_agent_orchestration_script() {
     "model": "qwen2.5-coder:32b",
     "specialty": "Multilingual Processing",
     "active": true
+  },
+  {
+    "name": "ImageForge",
+    "model": "diffusers/stable-diffusion-xl-base-1.0",
+    "specialty": "Image Generation",
+    "active": true
   }
 ]
 AGENTS_EOF
@@ -342,13 +348,15 @@ AGENTS_EOF
 
     progress "CREATING AGENT ORCHESTRATION SCRIPT (master_orchestrator.py)" # Clarified progress message
     cat>"$INSTALL_DIR/agents/master_orchestrator.py"<<'EOF'
-import asyncio,json,requests,subprocess,threading,queue,time
+import asyncio, json, requests, subprocess, threading, queue, time, datetime
+import torch
+import aiohttp
+from diffusers import DiffusionPipeline
 from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import List,Dict,Any,Optional
 from pathlib import Path
-import streamlit as st
-import pandas as pd
+# streamlit and pandas are not directly used here but in the UI script that imports this.
 
 @dataclass
 class Agent:
@@ -357,8 +365,6 @@ class Agent:
 class TerminusOrchestrator:
    def __init__(self):
        self.agents = []
-       # Path to agents.json, assuming master_orchestrator.py is in INSTALL_DIR/agents/
-       # and agents.json is in INSTALL_DIR
        agents_file_path = Path(__file__).parent.parent / "agents.json"
        try:
            with open(agents_file_path, 'r') as f:
@@ -368,43 +374,114 @@ class TerminusOrchestrator:
                    name=agent_config.get('name'),
                    model=agent_config.get('model'),
                    specialty=agent_config.get('specialty'),
-                   active=agent_config.get('active', True) # Default to True if missing
+                   active=agent_config.get('active', True)
                ))
        except FileNotFoundError:
            print(f"ERROR: agents.json not found at {agents_file_path}. No agents loaded.")
-           # Optionally, load default agents or raise an error
        except json.JSONDecodeError:
            print(f"ERROR: Could not decode agents.json. Invalid JSON format. No agents loaded.")
-           # Optionally, load default agents or raise an error
        except Exception as e:
            print(f"ERROR: An unexpected error occurred while loading agents from agents.json: {e}. No agents loaded.")
 
-       # Ensure self.ollama_url and self.active_tasks are still initialized
-       self.ollama_url="http://localhost:11434/api/generate" # Keep this
-       self.active_tasks={} # Keep this
+       self.ollama_url="http://localhost:11434/api/generate"
+       self.active_tasks={}
 
-   async def execute_agent(self,agent:Agent,prompt:str,context:Dict=None)->Dict:
+       # Image Generation Setup
+       self.image_gen_pipeline = None
+       self.device = "cuda" if torch.cuda.is_available() else "cpu"
+       self.image_gen_model_id = "stabilityai/stable-diffusion-xl-base-1.0" # Default, can be made configurable
+       self.generated_images_dir = Path(__file__).parent.parent / "data" / "generated_images"
+       self.generated_images_dir.mkdir(parents=True, exist_ok=True)
+
+   async def generate_image_with_diffusion(self, prompt: str) -> Dict:
+       if self.image_gen_pipeline is None:
+           print(f"Loading image generation model ({self.image_gen_model_id})... This may take a while.")
+           try:
+               self.image_gen_pipeline = DiffusionPipeline.from_pretrained(
+                   self.image_gen_model_id,
+                   torch_dtype=torch.float16, # Use float16 for efficiency
+                   use_safetensors=True
+               )
+               self.image_gen_pipeline.to(self.device)
+               # Optional: if low VRAM, enable CPU offloading
+               # if self.device == "cuda": # Only for CUDA, check VRAM if possible
+               #     try:
+               #         if torch.cuda.get_device_properties(0).total_memory < 8 * 1024**3: # Example: Less than 8GB VRAM
+               #             print("Low VRAM detected, enabling model CPU offload for image generation.")
+               #             self.image_gen_pipeline.enable_model_cpu_offload()
+               #     except Exception as e:
+               #         print(f"Could not check VRAM properties: {e}. Proceeding without CPU offload check.")
+               print("Image generation model loaded.")
+           except Exception as e:
+               print(f"ERROR: Could not load image generation model: {str(e)}")
+               return {"agent": "ImageForge", "response": f"Error loading model: {str(e)}", "status": "error", "image_path": None}
+
+       print(f"Generating image for prompt: '{prompt}' on device: {self.device}")
        try:
-           payload={"model":agent.model,"prompt":f"[{agent.specialty}] {prompt}","stream":False,"options":{"temperature":0.7}}
-           if context:payload["prompt"]+=f"
-Context: {json.dumps(context)}"
-           async with aiohttp.ClientSession() as session:
-               async with session.post(self.ollama_url,json=payload) as resp:
-                   result=await resp.json()
-                   return {"agent":agent.name,"model":agent.model,"response":result.get("response","Error"),"status":"success"}
+           image = self.image_gen_pipeline(prompt).images[0]
+
+           timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+           image_filename = f"image_{timestamp}.png"
+           image_path = self.generated_images_dir / image_filename
+           image.save(image_path)
+           print(f"Image saved to {image_path}")
+
+           return {
+               "agent": "ImageForge",
+               "response": f"Image generated successfully: {image_filename}",
+               "status": "success",
+               "image_path": str(image_path)
+           }
        except Exception as e:
-           return {"agent":agent.name,"model":agent.model,"response":f"Error: {str(e)}","status":"error"}
+           print(f"ERROR: Failed to generate image: {str(e)}")
+           return {"agent": "ImageForge", "response": f"Error generating image: {str(e)}", "status": "error", "image_path": None}
+
+   async def execute_agent(self, agent: Agent, prompt: str, context: Dict = None) -> Dict:
+       if agent.name == "ImageForge": # Or use agent.specialty == "Image Generation"
+           return await self.generate_image_with_diffusion(prompt)
+       else:
+           try:
+               payload = {"model": agent.model, "prompt": f"[{agent.specialty}] {prompt}", "stream": False, "options": {"temperature": 0.7}}
+               if context:
+                   payload["prompt"] += f"\nContext: {json.dumps(context)}"
+
+               async with aiohttp.ClientSession() as session:
+                   async with session.post(self.ollama_url, json=payload) as resp:
+                       if resp.status != 200:
+                           error_text = await resp.text()
+                           print(f"Ollama API Error for agent {agent.name} with model {agent.model}: {resp.status} - {error_text}")
+                           return {"agent": agent.name, "model": agent.model, "response": f"Error from Ollama: {resp.status} - {error_text}", "status": "error"}
+                       result = await resp.json()
+                       return {"agent": agent.name, "model": agent.model, "response": result.get("response", "Error: No response field"), "status": "success"}
+           except aiohttp.ClientConnectorError as e:
+               print(f"Connection Error for agent {agent.name} (model {agent.model}) targeting {self.ollama_url}: {str(e)}")
+               return {"agent": agent.name, "model": agent.model, "response": f"Connection Error: Could not connect to Ollama server at {self.ollama_url}. Details: {str(e)}", "status": "error"}
+           except Exception as e:
+               print(f"Generic Error executing agent {agent.name} (model {agent.model}): {str(e)}")
+               return {"agent": agent.name, "model": agent.model, "response": f"Error executing agent: {str(e)}", "status": "error"}
 
    async def parallel_execution(self,prompt:str,selected_agents:List[str]=None)->List[Dict]:
        if not selected_agents:selected_agents=[a.name for a in self.agents if a.active]
        active_agents=[a for a in self.agents if a.name in selected_agents and a.active]
        tasks=[self.execute_agent(agent,prompt) for agent in active_agents]
        results=await asyncio.gather(*tasks,return_exceptions=True)
+       # Filter out exceptions that might have been returned by gather if return_exceptions=True
+       # and properly format them if necessary, or ensure execute_agent always returns a dict.
+       # For now, assuming execute_agent always returns a dict as per its signature.
        return [r for r in results if isinstance(r,dict)]
 
    def consensus_analysis(self,results:List[Dict])->Dict:
        responses=[r["response"] for r in results if r["status"]=="success"]
-       return {"consensus_score":len(responses)/len(results),"best_response":max(responses,key=len) if responses else "No valid responses","summary":f"Processed by {len(responses)} agents"}
+       # Basic consensus: return the most common response or the longest one if all unique
+       if not responses:
+           return {"consensus_score":0, "best_response":"No valid responses from agents.", "summary":"No successful agent responses."}
+
+       # Example: Could count frequencies or find longest/most detailed if diverse.
+       # For now, a simplified approach:
+       best_response = max(responses, key=len) if responses else "No valid responses"
+       consensus_score = len(responses) / len(results) if results else 0 # results could be empty if all selected_agents were inactive
+
+       return {"consensus_score":consensus_score,"best_response":best_response,"summary":f"Processed by {len(responses)} of {len(results)} initially tasked agents."}
 
 class DocumentUniverse:
    def __init__(self):
@@ -417,9 +494,20 @@ class DocumentUniverse:
    def csv_proc(self,file):import csv;return list(csv.reader(open(file)))
    def txt_proc(self,file):return open(file).read()
    def process_file(self,file_path):
-       ext=Path(file_path).suffix.lower()
+       # This method expects a file path string or a file-like object for Streamlit's UploadedFile
+       # For now, assuming file_path is an UploadedFile object from Streamlit, which has a 'name' attribute
+       # and can be passed directly to functions expecting a file-like object.
+       # If it's a path string, it needs to be opened.
+       # This might need adjustment based on how Streamlit passes the file.
+       # Assuming the UploadedFile object itself can be passed to the processors if they handle file-like objects.
+       # For paths, they'd need open(file_path, 'rb') or similar.
+       # The current implementation seems to mix this. For simplicity, let's assume it receives a path for now.
+       # This part needs careful review if Streamlit UploadedFile objects are passed.
+       # For now, the logic is kept as is from the original script.
+       ext=Path(file_path.name).suffix.lower()[1:] if hasattr(file_path, 'name') else Path(file_path).suffix.lower()[1:]
        processor=self.processors.get(ext)
        return processor(file_path) if processor else "Unsupported format"
+
 
 class WebIntelligence:
    def __init__(self):
@@ -460,7 +548,7 @@ def main():
    # Sidebar Controls
    with st.sidebar:
        st.header("COMMAND CENTER")
-       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Code Generation","Data Analysis","Creative Suite"])
+       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Image Generation","Code Generation","Data Analysis","Creative Suite"])
 
        st.subheader("Agent Selection")
        agent_names=[a.name for a in orchestrator.agents]
@@ -538,6 +626,30 @@ def main():
                        with st.expander(f"{result['agent']} Analysis"):
                            st.write(result["response"])
 
+   elif operation_mode == "Image Generation":
+       st.subheader("IMAGE GENERATION STUDIO")
+       image_prompt = st.text_area("Enter your image description:", height=100, placeholder="E.g., 'A photorealistic cat astronaut on the moon'")
+       if st.button("Generate Image", type="primary"):
+           if image_prompt:
+               with st.spinner("Generating image... This may take a while, especially on first run or CPU."):
+                   # Ensure 'ImageForge' is available and selected
+                   imageforge_agent = next((agent for agent in orchestrator.agents if agent.name == "ImageForge"), None)
+                   if imageforge_agent and imageforge_agent.active:
+                       results = asyncio.run(orchestrator.parallel_execution(prompt=image_prompt, selected_agents=["ImageForge"]))
+                       if results and isinstance(results, list) and len(results) > 0:
+                           generation_result = results[0] # Expect one result for ImageForge
+                           if generation_result.get("status") == "success" and generation_result.get("image_path"):
+                               st.image(generation_result["image_path"], caption=f"Generated image for: {image_prompt}")
+                               st.success(f"Image successfully generated and saved to: {generation_result['image_path']}")
+                           else:
+                               st.error(f"Image generation failed: {generation_result.get('response', 'Unknown error')}")
+                       else:
+                           st.error("Image generation failed to produce a result.")
+                   else:
+                       st.error("ImageForge agent not found or is not active. Please check agent configuration.")
+           else:
+               st.warning("Please enter an image description.")
+
 if __name__=="__main__":
    main()
 EOF
@@ -553,17 +665,257 @@ import subprocess,os,ast,json,shlex
 from pathlib import Path
 
 class AutoDev:
-   def __init__(self):
-       self.tools={"format":"black","lint":"flake8","type":"mypy","test":"pytest","security":"bandit"}
+    def __init__(self):
+        self.tools = {"format": "black", "lint": "flake8", "type": "mypy", "test": "pytest", "security": "bandit"}
+        self.gitignore_content = """# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
 
-   def create_project(self,name,lang="python"):
-       project_path=Path(name)
-       project_path.mkdir(exist_ok=True)
-       if lang=="python":
-           (project_path/"main.py").write_text("#!/usr/bin/env python3\n\ndef main():\n    print('Hello World')\n\nif __name__=='__main__':\n    main()")
-           (project_path/"requirements.txt").write_text("")
-           (project_path/"README.md").write_text(f"# {name}\n\nProject created by Terminus AI")
-       return f"Project {name} created successfully"
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# PEP 582; __pypackages__
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+"""
+
+    def create_project(self, name, project_type="python_cli"):
+        project_path = Path(name)
+        project_path.mkdir(exist_ok=True)
+
+        if project_type == "python_cli":
+            main_py_content = """#!/usr/bin/env python3
+import typer
+from typing_extensions import Annotated
+
+app = typer.Typer()
+
+@app.command()
+def hello(name: Annotated[str, typer.Option(prompt="Enter your name")] = "World"):
+    print(f"Hello {name}")
+
+@app.command()
+def goodbye(name: str = "World", formal: bool = False):
+    if formal:
+        print(f"Goodbye Ms. {name}. Have a good day.")
+    else:
+        print(f"Bye {name}!")
+
+if __name__ == "__main__":
+    app()
+"""
+            requirements_txt_content = "typer[all]==0.12.3"
+            readme_md_content = f"""# {name}
+
+A Command Line Interface (CLI) application built with Typer.
+
+## Created by Terminus AI
+
+## Installation
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+```bash
+python main.py --help
+python main.py hello
+python main.py goodbye --name Gokay
+```
+"""
+            (project_path / "main.py").write_text(main_py_content)
+            (project_path / "requirements.txt").write_text(requirements_txt_content)
+            (project_path / "README.md").write_text(readme_md_content)
+            (project_path / ".gitignore").write_text(self.gitignore_content)
+            return f"Python CLI project '{name}' created successfully at {project_path}"
+
+        elif project_type == "python_fastapi":
+            app_dir = project_path / "app"
+            app_dir.mkdir(exist_ok=True)
+
+            main_py_content_fastapi = f"""from fastapi import FastAPI
+from typing import Dict
+
+app = FastAPI(title="{name} API", version="0.1.0")
+
+@app.get("/")
+async def read_root() -> Dict[str, str]:
+    return {{"message": "Welcome to {name}!"}}
+
+@app.get("/items/{{item_id}}")
+async def read_item(item_id: int, q: str | None = None) -> Dict[str, any]:
+    return {{"item_id": item_id, "q": q}}
+
+# To run this application:
+# 1. Install uvicorn: pip install "uvicorn[standard]"
+# 2. Navigate to the project directory in your terminal.
+# 3. Run: uvicorn app.main:app --reload
+"""
+            (app_dir / "main.py").write_text(main_py_content_fastapi)
+
+            requirements_txt_content_fastapi = """fastapi==0.111.0
+uvicorn[standard]==0.29.0
+"""
+            (project_path / "requirements.txt").write_text(requirements_txt_content_fastapi)
+
+            readme_md_content_fastapi = f"""# {name} - FastAPI Backend
+
+A FastAPI backend application.
+
+## Created by Terminus AI
+
+## Project Structure
+```
+{name}/
+├── app/
+│   └── main.py     # Main application logic
+├── requirements.txt  # Project dependencies
+└── README.md         # This file
+```
+
+## Setup and Installation
+1.  Create a virtual environment (recommended):
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows use \`venv\Scripts\\activate\`
+    ```
+2.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Running the Application
+Navigate to the project's root directory (`{name}/`) in your terminal and run:
+```bash
+uvicorn app.main:app --reload
+```
+The application will typically be available at `http://127.0.0.1:8000`.
+"""
+            (project_path / "README.md").write_text(readme_md_content_fastapi)
+            (project_path / ".gitignore").write_text(self.gitignore_content) # Reuse
+            return f"Python FastAPI project '{name}' created successfully at {project_path}"
+        else:
+            # Fallback to basic Python project
+            (project_path/"main.py").write_text("""#!/usr/bin/env python3
+
+def main():
+    print('Hello World')
+
+if __name__=='__main__':
+    main()""")
+            (project_path/"requirements.txt").write_text("")
+            (project_path/"README.md").write_text(f"# {name}\n\nProject created by Terminus AI")
+            return f"Basic Python project '{name}' created successfully at {project_path}"
 
    def analyze_code(self,file_path):
        try:

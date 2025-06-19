@@ -17,8 +17,8 @@ weaviate-client==3.24.1
 pinecone-client==2.2.4
 
 # Added from script-generating functions
-qiskit==X.Y.Z
-pennylane==X.Y.Z
-tensorflow-quantum==X.Y.Z
-cirq==X.Y.Z
-ray==X.Y.Z
+qiskit==1.1.1
+pennylane==0.37.0
+tensorflow-quantum==X.Y.Z  # Version lookup failed (PyPI access issue)
+cirq==X.Y.Z  # Version lookup failed (PyPI access issue)
+ray==2.32.0
