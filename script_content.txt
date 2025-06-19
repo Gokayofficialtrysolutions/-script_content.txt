@@ -356,6 +356,7 @@ from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import List,Dict,Any,Optional
 from pathlib import Path
+from tools.auto_dev import auto_dev # Added for project scaffolding
 # streamlit and pandas are not directly used here but in the UI script that imports this.
 
 @dataclass
@@ -392,6 +393,30 @@ class TerminusOrchestrator:
        self.image_gen_model_id = "stabilityai/stable-diffusion-xl-base-1.0" # Default, can be made configurable
        self.generated_images_dir = Path(__file__).parent.parent / "data" / "generated_images"
        self.generated_images_dir.mkdir(parents=True, exist_ok=True)
+
+   async def scaffold_new_project(self, project_name: str, project_type: str) -> Dict:
+       if not project_name or not project_type:
+           return {"status": "error", "message": "Project name and type are required."}
+
+       # Sanitize project_name to prevent directory traversal or invalid characters
+       # A simple alphanumeric check, allowing underscores and hyphens
+       safe_project_name = "".join(c if c.isalnum() or c in ['_', '-'] else '_' for c in project_name)
+       if not safe_project_name: # Handle case where sanitization results in an empty string
+           safe_project_name = "default_project_name"
+
+       print(f"Attempting to scaffold project: Name='{safe_project_name}', Type='{project_type}'")
+       try:
+           # auto_dev is imported at the top of the file now
+           message = auto_dev.create_project(name=safe_project_name, project_type=project_type)
+
+           if "successfully" in message:
+               return {"status": "success", "message": message, "project_name": safe_project_name, "project_type": project_type}
+           else:
+               return {"status": "error", "message": message}
+       except Exception as e:
+           error_message = f"Failed to scaffold project '{safe_project_name}' of type '{project_type}': {str(e)}"
+           print(f"ERROR: {error_message}")
+           return {"status": "error", "message": error_message}
 
    async def generate_image_with_diffusion(self, prompt: str) -> Dict:
        if self.image_gen_pipeline is None:
@@ -460,15 +485,68 @@ class TerminusOrchestrator:
                print(f"Generic Error executing agent {agent.name} (model {agent.model}): {str(e)}")
                return {"agent": agent.name, "model": agent.model, "response": f"Error executing agent: {str(e)}", "status": "error"}
 
-   async def parallel_execution(self,prompt:str,selected_agents:List[str]=None)->List[Dict]:
-       if not selected_agents:selected_agents=[a.name for a in self.agents if a.active]
-       active_agents=[a for a in self.agents if a.name in selected_agents and a.active]
-       tasks=[self.execute_agent(agent,prompt) for agent in active_agents]
-       results=await asyncio.gather(*tasks,return_exceptions=True)
-       # Filter out exceptions that might have been returned by gather if return_exceptions=True
-       # and properly format them if necessary, or ensure execute_agent always returns a dict.
-       # For now, assuming execute_agent always returns a dict as per its signature.
-       return [r for r in results if isinstance(r,dict)]
+   async def parallel_execution(self, prompt: str, selected_agents: List[str] = None, context: Dict = None) -> List[Dict]:
+       prompt_lower = prompt.lower()
+       active_agents_list = []
+       agent_selection_reason = "User selected"
+
+       if not selected_agents:
+           agent_keywords = {
+               "ImageForge": ["image of", "picture of", "draw a", "generate art", "create a photo", "generate image"],
+               "CodeMaster": ["python code for", "write a script to", "generate a function that", "develop a program to", "code snippet for"],
+               "DataWizard": ["analyze data", "statistics for csv", "excel report on", "plot data from", "database insights"],
+               "WebCrawler": ["search the web for", "find information online about", "what's the latest on", "look up on internet"],
+               "DocProcessor": ["summarize document", "analyze this text", "process pdf content", "read file content"],
+               "MathGenius": ["calculate", "solve math", "what is the result of", "compute"],
+           }
+
+           determined_agent_objects = []
+           # Use a set to keep track of names to avoid duplicate Agent objects
+           determined_agent_names = set()
+
+           for agent_name, keywords in agent_keywords.items():
+               if any(keyword in prompt_lower for keyword in keywords):
+                   agent_obj = next((a for a in self.agents if a.name == agent_name and a.active), None)
+                   if agent_obj and agent_obj.name not in determined_agent_names:
+                       determined_agent_objects.append(agent_obj)
+                       determined_agent_names.add(agent_obj.name)
+
+           if determined_agent_objects:
+               active_agents_list = determined_agent_objects
+               agent_selection_reason = "Intent recognized"
+           else:
+               default_general_agents = ["DeepThink", "CreativeWriter"]
+               active_agents_list = [a for a in self.agents if a.name in default_general_agents and a.active]
+               agent_selection_reason = "Default general agents"
+
+               if not active_agents_list: # If default general agents are not active or found
+                   active_agents_list = [a for a in self.agents if a.active] # Fallback to all active agents
+                   agent_selection_reason = "Fallback to all active"
+       else:
+           active_agents_list = [a for a in self.agents if a.name in selected_agents and a.active]
+
+       if not active_agents_list:
+           print("No active agents determined for the prompt. Cannot execute.")
+           return [{"agent": "System", "model": "N/A", "response": "No suitable active agents found for your request.", "status": "error"}]
+
+       print(f"Agents selected for prompt '{prompt[:50]}...': {[a.name for a in active_agents_list]} (Reason: {agent_selection_reason})")
+
+       tasks = [self.execute_agent(agent, prompt, context) for agent in active_agents_list]
+       results = await asyncio.gather(*tasks, return_exceptions=True)
+
+       processed_results = []
+       for i, r_or_e in enumerate(results):
+           agent_name = active_agents_list[i].name if i < len(active_agents_list) else "UnknownAgent"
+           agent_model = active_agents_list[i].model if i < len(active_agents_list) else "N/A"
+           if isinstance(r_or_e, Exception):
+               print(f"Error during execution for agent {agent_name}: {r_or_e}")
+               processed_results.append({"agent": agent_name, "model": agent_model, "response": f"An unexpected error occurred: {str(r_or_e)}", "status": "error"})
+           elif isinstance(r_or_e, dict):
+               processed_results.append(r_or_e)
+           else:
+               processed_results.append({"agent": agent_name, "model": agent_model, "response": f"Unexpected result type: {type(r_or_e)}", "status": "error"})
+
+       return processed_results
 
    def consensus_analysis(self,results:List[Dict])->Dict:
        responses=[r["response"] for r in results if r["status"]=="success"]
@@ -649,6 +727,44 @@ def main():
                        st.error("ImageForge agent not found or is not active. Please check agent configuration.")
            else:
                st.warning("Please enter an image description.")
+
+   elif operation_mode == "Code Generation":
+       st.subheader("PROJECT SCAFFOLDING & CODE GENERATION")
+
+       st.markdown("### 🏗️ Scaffold New Project")
+
+       project_name = st.text_input("Enter Project Name:", placeholder="e.g., my_new_cli_app")
+
+       project_type_options = {
+           "Python CLI (Typer)": "python_cli",
+           "Python FastAPI Backend": "python_fastapi",
+           "Python Streamlit Dashboard": "python_streamlit",
+           "Basic Python Project": "python_basic"
+       }
+       display_project_type = st.selectbox(
+           "Select Project Type:",
+           options=list(project_type_options.keys())
+       )
+       selected_project_type_value = project_type_options[display_project_type]
+
+       if st.button("Scaffold Project", type="primary"):
+           if project_name and selected_project_type_value:
+               with st.spinner(f"Scaffolding '{project_name}' as {display_project_type}..."):
+                   result = asyncio.run(orchestrator.scaffold_new_project(
+                       project_name=project_name,
+                       project_type=selected_project_type_value
+                   ))
+
+                   if result and result.get("status") == "success":
+                       st.success(result.get("message", "Project scaffolded successfully!"))
+                   else:
+                       st.error(result.get("message", "Failed to scaffold project."))
+           else:
+               st.warning("Please enter a project name and select a project type.")
+
+       st.markdown("---")
+       st.markdown("### 🤖 AI-Assisted Code Generation (Future Feature)")
+       st.info("The ability to generate code snippets or refine existing code using AI agents will be developed here.")
 
 if __name__=="__main__":
    main()
@@ -904,6 +1020,91 @@ The application will typically be available at `http://127.0.0.1:8000`.
             (project_path / "README.md").write_text(readme_md_content_fastapi)
             (project_path / ".gitignore").write_text(self.gitignore_content) # Reuse
             return f"Python FastAPI project '{name}' created successfully at {project_path}"
+
+        elif project_type == "python_streamlit":
+            app_py_content_streamlit = f"""import streamlit as st
+import pandas as pd
+import numpy as np
+
+st.set_page_config(layout="wide")
+
+st.title("📊 {name} - Streamlit Dashboard")
+
+st.header("Sample Data Visualization")
+st.write("This is a simple example of a Streamlit dashboard.")
+
+# Sample Data
+chart_data = pd.DataFrame(
+    np.random.randn(20, 3),
+    columns=['a', 'b', 'c']
+)
+
+st.subheader("Line Chart")
+st.line_chart(chart_data)
+
+st.subheader("Area Chart")
+st.area_chart(chart_data)
+
+st.sidebar.header("Controls")
+option = st.sidebar.selectbox(
+    "Choose a chart type:",
+    ("Line Chart", "Area Chart", "Bar Chart (Random)")
+)
+
+if option == "Bar Chart (Random)":
+    st.subheader("Bar Chart")
+    bar_data = pd.DataFrame(
+        np.random.randint(0, 100, 50),
+        columns=['Data']
+    )
+    st.bar_chart(bar_data)
+
+st.write("---")
+st.write("Generated by Terminus AI AutoDev.")
+"""
+            (project_path / "app.py").write_text(app_py_content_streamlit)
+
+            requirements_txt_content_streamlit = """streamlit==1.36.0
+pandas
+numpy
+"""
+            (project_path / "requirements.txt").write_text(requirements_txt_content_streamlit)
+
+            readme_md_content_streamlit = f"""# {name} - Streamlit Dashboard
+
+A Streamlit dashboard application.
+
+## Created by Terminus AI
+
+## Project Structure
+```
+{name}/
+├── app.py            # Main Streamlit application
+├── requirements.txt  # Project dependencies
+└── README.md         # This file
+```
+
+## Setup and Installation
+1.  Create a virtual environment (recommended):
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows use \`venv\Scripts\\activate\`
+    ```
+2.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Running the Application
+Navigate to the project's root directory (`{name}/`) in your terminal and run:
+```bash
+streamlit run app.py
+```
+The application will typically open in your web browser automatically.
+"""
+            (project_path / "README.md").write_text(readme_md_content_streamlit)
+            (project_path / ".gitignore").write_text(self.gitignore_content) # Reuse
+            return f"Python Streamlit project '{name}' created successfully at {project_path}"
         else:
             # Fallback to basic Python project
             (project_path/"main.py").write_text("""#!/usr/bin/env python3
