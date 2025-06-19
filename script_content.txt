@@ -352,6 +352,8 @@ import asyncio, json, requests, subprocess, threading, queue, time, datetime
 import torch
 import aiohttp
 from diffusers import DiffusionPipeline
+from moviepy.editor import VideoFileClip
+import shutil # Added for file backup operations
 from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import List,Dict,Any,Optional
@@ -394,6 +396,10 @@ class TerminusOrchestrator:
        self.generated_images_dir = Path(__file__).parent.parent / "data" / "generated_images"
        self.generated_images_dir.mkdir(parents=True, exist_ok=True)
 
+       # Video Processing Setup
+       self.video_processing_dir = Path(__file__).parent.parent / "data" / "video_outputs"
+       self.video_processing_dir.mkdir(parents=True, exist_ok=True)
+
    async def scaffold_new_project(self, project_name: str, project_type: str) -> Dict:
        if not project_name or not project_type:
            return {"status": "error", "message": "Project name and type are required."}
@@ -417,6 +423,174 @@ class TerminusOrchestrator:
            error_message = f"Failed to scaffold project '{safe_project_name}' of type '{project_type}': {str(e)}"
            print(f"ERROR: {error_message}")
            return {"status": "error", "message": error_message}
+
+   async def get_video_metadata(self, video_path: str) -> Dict:
+       try:
+           target_video_path = Path(video_path)
+           if not target_video_path.is_file():
+               return {"status": "error", "message": f"Video file not found: {video_path}"}
+
+           clip = VideoFileClip(str(target_video_path))
+           metadata = {
+               "filename": target_video_path.name,
+               "duration_seconds": clip.duration,
+               "fps": clip.fps,
+               "width": clip.w,
+               "height": clip.h,
+           }
+           if hasattr(clip, 'aspect_ratio'):
+               metadata["aspect_ratio"] = clip.aspect_ratio
+           clip.close()
+           return {"status": "success", "message": "Video metadata extracted.", "metadata": metadata}
+       except Exception as e:
+           return {"status": "error", "message": f"Failed to get video metadata for '{video_path}': {str(e)}"}
+
+   async def extract_video_frame(self, video_path: str, timestamp_str: str) -> Dict:
+       clip = None # Initialize clip to None for error handling
+       try:
+           target_video_path = Path(video_path)
+           if not target_video_path.is_file():
+               return {"status": "error", "message": f"Video file not found: {video_path}"}
+
+           timestamp_sec_for_filename = timestamp_str.replace(':','-').replace('.', '_')
+
+           clip = VideoFileClip(str(target_video_path))
+
+           try:
+               numeric_ts = float(timestamp_str) if ':' not in timestamp_str else None
+               if numeric_ts is not None and numeric_ts > clip.duration:
+                   clip.close()
+                   return {"status": "error", "message": f"Timestamp {timestamp_str} is beyond video duration ({clip.duration}s)."}
+           except ValueError:
+               pass # Let moviepy handle HH:MM:SS format
+
+           frame_filename = f"frame_{target_video_path.stem}_at_{timestamp_sec_for_filename}.png"
+           frame_path = self.video_processing_dir / frame_filename
+
+           clip.save_frame(str(frame_path), t=timestamp_str)
+           clip.close()
+
+           return {"status": "success", "message": f"Frame extracted to {frame_path}", "frame_path": str(frame_path)}
+       except Exception as e:
+           if clip and hasattr(clip, 'close'):
+               clip.close()
+           return {"status": "error", "message": f"Failed to extract frame from '{video_path}' at '{timestamp_str}': {str(e)}"}
+
+   async def convert_video_to_gif(self, video_path: str, start_str: str, end_str: str, resolution_scale: float = 0.5, fps: int = 10) -> Dict:
+       clip = None
+       subclip = None
+       subclip_resized = None
+       try:
+           target_video_path = Path(video_path)
+           if not target_video_path.is_file():
+               return {"status": "error", "message": f"Video file not found: {video_path}"}
+
+           clip = VideoFileClip(str(target_video_path))
+
+           subclip = clip.subclip(start_str, end_str)
+
+           if resolution_scale != 1.0 and resolution_scale > 0:
+               subclip_resized = subclip.resize(resolution_scale)
+           else:
+               subclip_resized = subclip
+
+           start_fn = start_str.replace(':','-').replace('.', '_')
+           end_fn = end_str.replace(':','-').replace('.', '_')
+           gif_filename = f"gif_{target_video_path.stem}_{start_fn}_to_{end_fn}.gif"
+           gif_path = self.video_processing_dir / gif_filename
+
+           subclip_resized.write_gif(str(gif_path), fps=fps)
+
+           if subclip_resized is not subclip : # if resize happened and created a new object
+                if hasattr(subclip_resized, 'close'): subclip_resized.close()
+           if hasattr(subclip, 'close'): subclip.close() # Always close original subclip
+           if hasattr(clip, 'close'): clip.close() # Always close original clip
+
+           return {"status": "success", "message": f"GIF created: {gif_path}", "gif_path": str(gif_path)}
+       except Exception as e:
+           if hasattr(subclip_resized, 'close') and subclip_resized is not None: subclip_resized.close()
+           if hasattr(subclip, 'close') and subclip is not None and (subclip_resized is None or subclip_resized is not subclip) : subclip.close()
+           if hasattr(clip, 'close') and clip is not None : clip.close()
+           return {"status": "error", "message": f"Failed to convert video '{video_path}' to GIF: {str(e)}"}
+
+   async def modify_code_in_project(self, project_name: str, relative_file_path: str, modification_instruction: str) -> Dict:
+       if not project_name or not relative_file_path or not modification_instruction:
+           return {"status": "error", "message": "Project name, file path, and modification instruction are required."}
+
+       project_base_path = Path(__file__).parent.parent
+
+       safe_project_name = "".join(c if c.isalnum() or c in ['_', '-'] else '_' for c in project_name)
+
+       safe_relative_file_path_parts = []
+       for part in Path(relative_file_path).parts:
+           if part == '..': # Disallow parent directory traversal
+               continue
+           safe_part = "".join(c if c.isalnum() or c in ['_', '-', '.'] else '_' for c in part)
+           if safe_part:
+                safe_relative_file_path_parts.append(safe_part)
+
+       if not safe_project_name or not safe_relative_file_path_parts:
+            return {"status": "error", "message": "Invalid project name or file path after sanitization."}
+
+       safe_relative_file_path = Path(*safe_relative_file_path_parts)
+       target_file_path = (project_base_path / safe_project_name / safe_relative_file_path).resolve()
+
+       expected_project_dir = (project_base_path / safe_project_name).resolve()
+       # Check if target_file_path is within expected_project_dir
+       # This check means target_file_path must be equal to expected_project_dir OR one of its children
+       if not (target_file_path == expected_project_dir or expected_project_dir in target_file_path.parents):
+           return {"status": "error", "message": "File path manipulation detected or invalid path structure."}
+
+       print(f"Attempting to modify file: {target_file_path} in project: {safe_project_name}")
+
+       if not target_file_path.is_file():
+           return {"status": "error", "message": f"File not found: {target_file_path}"}
+
+       try:
+           original_code = target_file_path.read_text(encoding='utf-8')
+
+           backup_file_path = target_file_path.with_suffix(target_file_path.suffix + f".bak_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+           shutil.copy2(target_file_path, backup_file_path)
+           print(f"Backup of original file created at: {backup_file_path}")
+
+           llm_prompt = (
+               f"Original code from file '{safe_relative_file_path}':\n"
+               f"```\n{original_code}\n```\n\n"
+               f"User request: {modification_instruction}\n\n"
+               f"Please provide the complete, modified code for the entire file based on the user request. "
+               f"Output only the raw code for the new file content, without any surrounding text, explanations, or markdown formatting."
+           )
+
+           codemaster_agent = next((agent for agent in self.agents if agent.name == "CodeMaster"), None)
+           if not codemaster_agent:
+               return {"status": "error", "message": "CodeMaster agent not found."}
+
+           print(f"Sending modification task to CodeMaster ({codemaster_agent.model})...")
+           modification_result = await self.execute_agent(codemaster_agent, llm_prompt) # context can be None
+
+           if modification_result.get("status") == "success":
+               modified_code = modification_result.get("response", "").strip()
+               if not modified_code:
+                   return {"status": "error", "message": "CodeMaster returned empty code. No changes applied. Original file restored from backup if possible, or backup retained."}
+
+               target_file_path.write_text(modified_code, encoding='utf-8')
+               success_msg = (
+                   f"File '{target_file_path}' modified successfully by CodeMaster. "
+                   f"Original backed up to '{backup_file_path}'. "
+                   f"Please review the changes carefully."
+               )
+               print(success_msg)
+               return {"status": "success", "message": success_msg, "modified_file": str(target_file_path)}
+           else:
+               err_msg = modification_result.get('response', 'CodeMaster failed to process the modification.')
+               print(f"CodeMaster execution failed: {err_msg}")
+               return {"status": "error", "message": f"CodeMaster failed: {err_msg}. Backup of original file is at {backup_file_path}."}
+
+       except Exception as e:
+           error_message = f"Failed to modify code in '{target_file_path}': {str(e)}"
+           print(f"ERROR: {error_message}")
+           backup_msg = f"Backup might be available at {backup_file_path}" if 'backup_file_path' in locals() else "No backup was made before error."
+           return {"status": "error", "message": f"{error_message}. {backup_msg}"}
 
    async def generate_image_with_diffusion(self, prompt: str) -> Dict:
        if self.image_gen_pipeline is None:
@@ -612,7 +786,7 @@ create_terminus_ui_script() {
     progress "CREATING TERMINUS UI SCRIPT"
     cat>"$INSTALL_DIR/terminus_ui.py"<<'EOF'
 import streamlit as st,asyncio,json,time,os,subprocess
-from pathlib import Path
+from pathlib import Path # Path is used for temp_video_path
 import pandas as pd,plotly.express as px,plotly.graph_objects as go
 from agents.master_orchestrator import orchestrator,doc_processor,web_intel
 
@@ -626,7 +800,7 @@ def main():
    # Sidebar Controls
    with st.sidebar:
        st.header("COMMAND CENTER")
-       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Image Generation","Code Generation","Data Analysis","Creative Suite"])
+       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Image Generation", "Video Processing", "Code Generation","Data Analysis","Creative Suite"])
 
        st.subheader("Agent Selection")
        agent_names=[a.name for a in orchestrator.agents]
@@ -728,6 +902,59 @@ def main():
            else:
                st.warning("Please enter an image description.")
 
+   elif operation_mode == "Video Processing":
+       st.subheader("🎞️ VIDEO PROCESSING UTILITIES")
+       uploaded_video = st.file_uploader("Upload a video file", type=['mp4', 'mov', 'avi', 'mkv'])
+
+       if uploaded_video is not None:
+           temp_video_dir = Path(__file__).parent / "temp_uploads"
+           temp_video_dir.mkdir(parents=True, exist_ok=True)
+           temp_video_path = temp_video_dir / uploaded_video.name
+           with open(temp_video_path, "wb") as f:
+               f.write(uploaded_video.getbuffer())
+
+           st.video(str(temp_video_path))
+           st.markdown("---")
+
+           video_task = st.selectbox("Select Video Task:", ["Get Video Info", "Extract Frame", "Convert to GIF"])
+
+           if video_task == "Get Video Info":
+               if st.button("Get Information"):
+                   with st.spinner("Fetching video information..."):
+                       result = asyncio.run(orchestrator.get_video_metadata(str(temp_video_path)))
+                       if result and result.get("status") == "success":
+                           st.success(result.get("message"))
+                           st.json(result.get("metadata"))
+                       else:
+                           st.error(result.get("message", "Failed to get video info."))
+
+           elif video_task == "Extract Frame":
+               timestamp = st.text_input("Enter Timestamp (e.g., 00:01:30 or 90 for seconds):", "00:00:05")
+               if st.button("Extract Frame"):
+                   with st.spinner(f"Extracting frame at {timestamp}..."):
+                       result = asyncio.run(orchestrator.extract_video_frame(str(temp_video_path), timestamp))
+                       if result and result.get("status") == "success":
+                           st.success(result.get("message"))
+                           st.image(result.get("frame_path"), caption=f"Frame at {timestamp}")
+                       else:
+                           st.error(result.get("message", "Failed to extract frame."))
+
+           elif video_task == "Convert to GIF":
+               col1, col2 = st.columns(2)
+               start_time = col1.text_input("Start Time (e.g., 00:00:00 or 0):", "0")
+               end_time = col2.text_input("End Time (e.g., 00:00:05 or 5):", "5")
+               gif_fps = st.slider("GIF FPS:", 5, 30, 10)
+               gif_scale = st.slider("Resolution Scale:", 0.1, 1.0, 0.5, 0.1)
+               if st.button("Convert to GIF"):
+                   with st.spinner("Converting to GIF... This may take time."):
+                       result = asyncio.run(orchestrator.convert_video_to_gif(str(temp_video_path), start_time, end_time, resolution_scale=gif_scale, fps=gif_fps))
+                       if result and result.get("status") == "success":
+                           st.success(result.get("message"))
+                           st.markdown(f"Download your GIF: `{result.get('gif_path')}` (Note: Direct display of local GIFs can be tricky in Streamlit, path provided).")
+                       else:
+                           st.error(result.get("message", "Failed to convert to GIF."))
+           # Consider cleaning up temp_video_path
+
    elif operation_mode == "Code Generation":
        st.subheader("PROJECT SCAFFOLDING & CODE GENERATION")
 
@@ -750,6 +977,8 @@ def main():
        if st.button("Scaffold Project", type="primary"):
            if project_name and selected_project_type_value:
                with st.spinner(f"Scaffolding '{project_name}' as {display_project_type}..."):
+                   # Call the new orchestrator method
+                   # orchestrator should be globally available or part of a session state
                    result = asyncio.run(orchestrator.scaffold_new_project(
                        project_name=project_name,
                        project_type=selected_project_type_value
@@ -757,6 +986,7 @@ def main():
 
                    if result and result.get("status") == "success":
                        st.success(result.get("message", "Project scaffolded successfully!"))
+                       # Potentially show the project path if available in message
                    else:
                        st.error(result.get("message", "Failed to scaffold project."))
            else:
@@ -765,6 +995,10 @@ def main():
        st.markdown("---")
        st.markdown("### 🤖 AI-Assisted Code Generation (Future Feature)")
        st.info("The ability to generate code snippets or refine existing code using AI agents will be developed here.")
+       # Placeholder for future AI code gen using CodeMaster LLM capabilities
+       # existing_code_prompt = st.text_area("Enter prompt for CodeMaster (e.g., 'Write a Python function to sort a list'):", height=150)
+       # if st.button("Generate with CodeMaster"):
+       #     st.info("CodeMaster (LLM) generation not fully implemented in this UI section yet.")
 
 if __name__=="__main__":
    main()
