@@ -1,50 +1,347 @@
 #!/bin/bash
 # OPUS MAGNUM: ULTIMATE TERMINALIS AI ECOSYSTEM
 # Size: ~280GB | Models: 25+ | Capabilities: UNLIMITED
-set -e;INSTALL_DIR="$HOME/.terminus-ai";LOG="$INSTALL_DIR/install.log";TOTAL=12;STEP=0
-progress(){STEP=$((STEP+1));echo "[$STEP/$TOTAL-$((STEP*100/TOTAL))%] $1"|tee -a "$LOG";}
-mkdir -p "$INSTALL_DIR"/{core,models,agents,tools,data,logs,cache};touch "$LOG"
-echo "TERMINUS AI: THE ULTIMATE LOCAL AI ECOSYSTEM";echo "Total: ~280GB | Models: 25+ | Agents: Unlimited"
+set -e
 
-# PHASE 1: QUANTUM CORE FOUNDATION (15GB)
-progress "INITIALIZING QUANTUM CORE SYSTEMS"
-if command -v apt &>/dev/null;then sudo apt update&&sudo apt install -y python3 python3-pip docker.io git curl wget build-essential cmake ninja-build nodejs npm golang rust-all-dev;fi
-if command -v brew &>/dev/null;then brew install python docker git curl wget cmake ninja nodejs go rust;fi
-python3 -m pip install --upgrade pip setuptools wheel
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip3 install transformers accelerate bitsandbytes optimum auto-gptq exllama2 ctransformers llama-cpp-python sentence-transformers faiss-gpu chromadb qdrant-client weaviate-client pinecone-client
-pip3 install langchain langchain-community langchain-experimental langgraph autogen crewai semantic-kernel guidance outlines jsonformer
-pip3 install gradio streamlit chainlit panel dash plotly bokeh altair matplotlib seaborn
-pip3 install asyncio aiohttp websockets fastapi uvicorn flask django tornado
-pip3 install requests beautifulsoup4 selenium scrapy playwright newspaper3k trafilatura readability-lxml
-pip3 install pandas numpy scipy scikit-learn xgboost lightgbm catboost
-pip3 install opencv-python pillow imageio moviepy whisper-openai
-pip3 install pymupdf python-docx openpyxl python-pptx beautifulsoup4 lxml pdfplumber tabula-py camelot-py pytesseract
-pip3 install sqlalchemy psycopg2-binary pymongo redis elasticsearch neo4j cassandra-driver
-pip3 install duckduckgo-search wikipedia-api arxiv scholarly googlesearch-python yfinance alpha-vantage
-pip3 install rich typer click fire argparse configparser pyyaml toml
-pip3 install jupyter jupyterlab notebook voila ipywidgets
-curl -fsSL https://ollama.ai/install.sh|sh;ollama serve &
+# Determine the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
-# PHASE 2: ULTIMATE MODEL CONSTELLATION (180GB)
-progress "DEPLOYING ULTIMATE AI MODEL CONSTELLATION"
-MODELS=(
-"deepseek-r1:32b" "deepseek-r1:7b" "deepseek-coder-v2:16b" "deepseek-math:7b"
-"qwen2.5:72b" "qwen2.5-coder:32b" "qwen2.5-math:7b" "qwen-vl:7b"
-"llama3.2:90b" "llama3.1:70b" "llama3.1:8b" "codellama:34b"
-"mixtral:8x22b" "mixtral:8x7b" "dolphin-mixtral:8x7b" "nous-hermes2:34b"
-"yi:34b" "yi-coder:9b" "internlm2:20b" "baichuan2:13b"
-"llava:34b" "llava-llama3:8b" "cogvlm2:19b" "internvl-chat:26b"
-"gemma2:27b" "gemma2:9b" "phi3:14b" "mistral:7b"
-"starcoder2:15b" "codegemma:7b" "magicoder:7b" "wizardcoder:34b"
-"neural-chat:7b" "solar:10.7b" "openchat:7b" "vicuna:33b"
-"orca2:13b" "zephyr:7b" "starling-lm:7b" "openhermes:7b"
-)
-for model in "${MODELS[@]}";do echo "Pulling $model...";ollama pull "$model" &;done;wait
+INSTALL_DIR="$HOME/.terminus-ai"
+LOG="$INSTALL_DIR/install.log"
+TOTAL=17 # Total number of main functions called by main()
+STEP=0
 
-# PHASE 3: AGENT ORCHESTRATION MATRIX (25GB)
-progress "CONSTRUCTING AGENT ORCHESTRATION MATRIX"
-cat>"$INSTALL_DIR/agents/master_orchestrator.py"<<'EOF'
+# Function to display progress
+progress(){
+    STEP=$((STEP+1))
+    echo "[$STEP/$TOTAL-$((STEP*100/TOTAL))%] $1" | tee -a "$LOG"
+}
+
+# Function for initial directory creation and logging setup
+initialize_setup() {
+    progress "INITIALIZING SETUP"
+    mkdir -p "$INSTALL_DIR"/{core,models,agents,tools,data,logs,cache}
+    touch "$LOG"
+    echo "TERMINUS AI: THE ULTIMATE LOCAL AI ECOSYSTEM" | tee -a "$LOG"
+    echo "Total: ~280GB | Models: 25+ | Agents: Unlimited" | tee -a "$LOG"
+
+    # Copy models.conf from script directory to INSTALL_DIR
+    if [ -f "$SCRIPT_DIR/models.conf" ]; then
+        cp "$SCRIPT_DIR/models.conf" "$INSTALL_DIR/models.conf"
+        echo "Copied models.conf to $INSTALL_DIR" | tee -a "$LOG"
+    else
+        echo "WARNING: models.conf not found in script directory ($SCRIPT_DIR). Model configuration will rely on fallback or potentially fail if critical." | tee -a "$LOG"
+        # The pull_ollama_models function has its own check for $INSTALL_DIR/models.conf and fallback.
+    fi
+}
+
+# Function to install system dependencies
+install_system_dependencies() {
+    progress "INSTALLING SYSTEM DEPENDENCIES" # Corresponds to old "INITIALIZING QUANTUM CORE SYSTEMS" (second part)
+    if command -v apt &>/dev/null; then
+        sudo apt update && sudo apt install -y python3 python3-pip docker.io git curl wget build-essential cmake ninja-build nodejs npm golang rust-all-dev
+    fi
+    if command -v brew &>/dev/null; then
+        brew install python docker git curl wget cmake ninja nodejs go rust
+    fi
+    # Add more error checking here in later plan steps
+}
+
+# No longer defining MODELS array globally. It's handled in pull_ollama_models function.
+
+# Function to install base Python packages like torch, transformers, etc.
+install_python_core_libraries() {
+    progress "INSTALLING PYTHON CORE LIBRARIES"
+    python3 -m pip install --upgrade pip setuptools wheel
+    if [ $? -ne 0 ]; then
+        echo "WARNING: Failed to upgrade pip, setuptools, or wheel. Check $LOG for details." | tee -a "$LOG"
+    fi
+    echo "Installing Python core libraries from $SCRIPT_DIR/core_requirements.txt" | tee -a "$LOG"
+    pip3 install -r "$SCRIPT_DIR/core_requirements.txt" || { echo "ERROR: Failed to install critical packages from $SCRIPT_DIR/core_requirements.txt. Aborting. Check $LOG for details." | tee -a "$LOG"; exit 1; }
+}
+
+# Function for Langchain, Autogen, UI frameworks, etc.
+install_python_framework_libraries() {
+    progress "INSTALLING PYTHON FRAMEWORK LIBRARIES"
+    echo "Installing Python framework libraries from $SCRIPT_DIR/frameworks_requirements.txt" | tee -a "$LOG"
+    pip3 install -r "$SCRIPT_DIR/frameworks_requirements.txt" || { echo "ERROR: Failed to install critical packages from $SCRIPT_DIR/frameworks_requirements.txt. Aborting. Check $LOG for details." | tee -a "$LOG"; exit 1; }
+}
+
+# Function for web scraping, data handling, file processing, etc.
+install_python_utility_libraries() {
+    progress "INSTALLING PYTHON UTILITY LIBRARIES"
+    echo "Installing Python utility libraries from $SCRIPT_DIR/utils_requirements.txt" | tee -a "$LOG"
+    pip3 install -r "$SCRIPT_DIR/utils_requirements.txt" || { echo "ERROR: Failed to install critical packages from $SCRIPT_DIR/utils_requirements.txt. Aborting. Check $LOG for details." | tee -a "$LOG"; exit 1; }
+}
+
+# Function for installing Ollama
+install_ollama_and_dependencies() {
+    progress "INSTALLING OLLAMA AND DEPENDENCIES"
+    curl -fsSL https://ollama.ai/install.sh | sh
+    ollama serve &
+    echo "Waiting for Ollama server to start..." | tee -a "$LOG"
+    sleep 10 # Increased sleep time for robustness
+    if ! ollama list > /dev/null 2>&1 && ! curl -sf --head http://localhost:11434 | grep "HTTP/[12]\.[01] [2].." > /dev/null; then
+        echo "ERROR: Ollama server failed to start or is not responding. Aborting. Check $LOG for details." | tee -a "$LOG"
+        exit 1
+    else
+        echo "Ollama server started successfully." | tee -a "$LOG"
+    fi
+}
+
+# Function for downloading AI models
+pull_ollama_models() {
+    progress "SELECTING AND PULLING OLLAMA MODELS"
+
+    ALL_AVAILABLE_MODELS=()
+    CORE_MODELS=()
+    CURRENT_SECTION=""
+    CONFIG_FILE="$INSTALL_DIR/models.conf" # Assuming models.conf is in INSTALL_DIR
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "ERROR: Configuration file '$CONFIG_FILE' not found." | tee -a "$LOG"
+        echo "Please ensure 'models.conf' exists in $INSTALL_DIR." | tee -a "$LOG"
+        echo "Proceeding with no models available for selection. You can only skip model download." | tee -a "$LOG"
+        # Fallback: Define minimal core models if config is missing, to prevent errors later if user tries to select core
+        CORE_MODELS=("llama3.1:8b" "mistral:7b") # Minimal fallback
+    else
+        echo "Reading model lists from $CONFIG_FILE..." | tee -a "$LOG"
+        while IFS= read -r line || [ -n "$line" ]; do
+            # Remove leading/trailing whitespace (optional, but good for robustness)
+            line=$(echo "$line" | awk '{$1=$1};1')
+
+            # Skip empty lines and comments
+            [[ "$line" =~ ^\s*# ]] && continue
+            [[ "$line" =~ ^\s*$ ]] && continue
+
+            if [[ "$line" =~ ^\[(.*)\]$ ]]; then
+                CURRENT_SECTION="${BASH_REMATCH[1]}"
+            else
+                # Remove potential carriage returns for cross-platform compatibility
+                line=$(echo "$line" | tr -d '\r')
+                if [ -n "$line" ]; then # Ensure line is not empty after stripping CR
+                    case "$CURRENT_SECTION" in
+                        ALL_AVAILABLE_MODELS)
+                            ALL_AVAILABLE_MODELS+=("$line")
+                            ;;
+                        CORE_MODELS)
+                            CORE_MODELS+=("$line")
+                            ;;
+                    esac
+                fi
+            fi
+        done < "$CONFIG_FILE"
+        echo "Finished reading model lists. Found ${#ALL_AVAILABLE_MODELS[@]} available models and ${#CORE_MODELS[@]} core models." | tee -a "$LOG"
+    fi
+
+    if [ ${#ALL_AVAILABLE_MODELS[@]} -eq 0 ] && [ -f "$CONFIG_FILE" ]; then
+        echo "WARNING: No models were loaded from $CONFIG_FILE. It might be empty or incorrectly formatted." | tee -a "$LOG"
+        echo "Model download options will be limited. You may only be able to skip." | tee -a "$LOG"
+    elif [ ${#ALL_AVAILABLE_MODELS[@]} -eq 0 ] && [ ! -f "$CONFIG_FILE" ]; then
+        # Error already printed, this is just to ensure the flow is logical
+        echo "Continuing with no models defined due to missing models.conf." | tee -a "$LOG"
+    fi
+
+    # Ensure CORE_MODELS is not empty if user might select it, even if ALL_AVAILABLE_MODELS is empty.
+    # This is a safety net, though the user prompt should guide them.
+    if [ ${#CORE_MODELS[@]} -eq 0 ] && [ ${#ALL_AVAILABLE_MODELS[@]} -gt 0 ]; then
+        echo "WARNING: CORE_MODELS list is empty in models.conf. Selecting 'CORE' will result in no models being downloaded unless ALL models are also empty." | tee -a "$LOG"
+    elif [ ${#CORE_MODELS[@]} -eq 0 ] && [ ${#ALL_AVAILABLE_MODELS[@]} -eq 0 ]; then
+         # If both are empty (e.g. models.conf missing and no fallback for CORE_MODELS or ALL_AVAILABLE_MODELS)
+         CORE_MODELS=("llama3.1:8b" "mistral:7b") # Re-apply minimal fallback for safety if somehow cleared
+         echo "Re-applying minimal fallback for CORE_MODELS as both lists were empty." | tee -a "$LOG"
+    fi
+
+
+    echo "----------------------------------------------------------------------" | tee -a "$LOG"
+    echo "Ollama Model Installation Options:" | tee -a "$LOG"
+    echo "----------------------------------------------------------------------" | tee -a "$LOG"
+    echo "Available models for installation:" | tee -a "$LOG"
+    for i in "${!ALL_AVAILABLE_MODELS[@]}"; do
+        printf "  %2d. %s\n" "$((i+1))" "${ALL_AVAILABLE_MODELS[$i]}" | tee -a "$LOG"
+    done
+    echo "----------------------------------------------------------------------" | tee -a "$LOG"
+    echo "You can choose to:" | tee -a "$LOG"
+    echo "  1. Download ALL available models (${#ALL_AVAILABLE_MODELS[@]} models, ~180GB+)." | tee -a "$LOG"
+    echo "  2. Download a CORE set of essential models (${#CORE_MODELS[@]} models, ~20-50GB)." | tee -a "$LOG"
+    echo "  3. Select specific models to download." | tee -a "$LOG"
+    echo "  4. Skip Ollama model downloads for now." | tee -a "$LOG"
+    echo "----------------------------------------------------------------------" | tee -a "$LOG"
+    read -r -p "Enter your choice (1, 2, 3, or 4): " user_choice
+
+    MODELS_TO_PULL=()
+    case "$user_choice" in
+        1)
+            echo "Preparing to download ALL ${#ALL_AVAILABLE_MODELS[@]} models." | tee -a "$LOG"
+            MODELS_TO_PULL=("${ALL_AVAILABLE_MODELS[@]}")
+            ;;
+        2)
+            echo "Preparing to download CORE set of ${#CORE_MODELS[@]} models." | tee -a "$LOG"
+            MODELS_TO_PULL=("${CORE_MODELS[@]}")
+            ;;
+        3)
+            echo "Enter the names of the models you wish to download, separated by spaces." | tee -a "$LOG"
+            echo "Example: llama3.1:8b mistral:7b deepseek-coder-v2:16b" | tee -a "$LOG"
+            echo "Available models listed above. Please type or copy-paste exact names." | tee -a "$LOG"
+            read -r -p "Selected models: " selected_models_str
+            # Convert the space-separated string to an array
+            read -r -a USER_SELECTED_MODELS <<< "$selected_models_str"
+
+            # Validate user selections
+            for model_name in "${USER_SELECTED_MODELS[@]}"; do
+                is_valid=false
+                for available_model in "${ALL_AVAILABLE_MODELS[@]}"; do
+                    if [[ "$model_name" == "$available_model" ]]; then
+                        MODELS_TO_PULL+=("$model_name")
+                        is_valid=true
+                        break
+                    fi
+                done
+                if ! $is_valid; then
+                    echo "WARNING: Model '$model_name' is not in the list of available models and will be skipped." | tee -a "$LOG"
+                fi
+            done
+
+            if [ ${#MODELS_TO_PULL[@]} -eq 0 ] && [ ${#USER_SELECTED_MODELS[@]} -ne 0 ]; then
+                 echo "No valid models selected from your input. Defaulting to CORE models." | tee -a "$LOG"
+                 MODELS_TO_PULL=("${CORE_MODELS[@]}")
+            elif [ ${#MODELS_TO_PULL[@]} -eq 0 ]; then
+                 echo "No models selected. Defaulting to CORE models." | tee -a "$LOG"
+                 MODELS_TO_PULL=("${CORE_MODELS[@]}")
+            fi
+            ;;
+        4)
+            echo "Skipping Ollama model downloads as per user choice." | tee -a "$LOG"
+            # MODELS_TO_PULL will remain empty
+            ;;
+        *)
+            echo "Invalid choice. Defaulting to CORE set of models." | tee -a "$LOG"
+            MODELS_TO_PULL=("${CORE_MODELS[@]}")
+            ;;
+    esac
+
+    if [ ${#MODELS_TO_PULL[@]} -eq 0 ]; then
+        echo "No models selected for download. Skipping Ollama model pulling phase." | tee -a "$LOG"
+        return
+    fi
+
+    echo "----------------------------------------------------------------------" | tee -a "$LOG"
+    echo "The following ${#MODELS_TO_PULL[@]} models will be downloaded:" | tee -a "$LOG"
+    for model_to_pull in "${MODELS_TO_PULL[@]}"; do
+        echo "- $model_to_pull" | tee -a "$LOG"
+    done
+    echo "----------------------------------------------------------------------" | tee -a "$LOG"
+    sleep 3 # Give user time to read
+
+    FAILED_MODELS=()
+    SUCCESSFUL_MODELS=0
+    TOTAL_MODELS_TO_PULL=${#MODELS_TO_PULL[@]}
+
+    for model in "${MODELS_TO_PULL[@]}";do # Iterate over MODELS_TO_PULL
+        echo "Pulling $model ($((SUCCESSFUL_MODELS + ${#FAILED_MODELS[@]} + 1))/$TOTAL_MODELS_TO_PULL)..." | tee -a "$LOG"
+        ollama pull "$model"
+        if [ $? -ne 0 ]; then
+            echo "WARNING: Failed to pull model $model. It will be skipped. Check $LOG for details." | tee -a "$LOG"
+            FAILED_MODELS+=("$model")
+        else
+            echo "Successfully pulled $model." | tee -a "$LOG"
+            SUCCESSFUL_MODELS=$((SUCCESSFUL_MODELS + 1))
+        fi
+    done
+
+    echo "Ollama model pulling complete. $SUCCESSFUL_MODELS/$TOTAL_MODELS models downloaded successfully." | tee -a "$LOG"
+
+    if [ ${#FAILED_MODELS[@]} -ne 0 ]; then
+        echo "Summary of failed model downloads (${#FAILED_MODELS[@]}):" | tee -a "$LOG"
+        for failed_model in "${FAILED_MODELS[@]}"; do
+            echo "- $failed_model" | tee -a "$LOG"
+        done
+    fi
+}
+
+# Function for generating master_orchestrator.py
+create_agent_orchestration_script() {
+    progress "CREATING AGENT CONFIGURATION FILE (agents.json)"
+    cat>"$INSTALL_DIR/agents.json"<<'AGENTS_EOF'
+[
+  {
+    "name": "DeepThink",
+    "model": "deepseek-r1:32b",
+    "specialty": "Advanced Reasoning & Logic",
+    "active": true
+  },
+  {
+    "name": "CodeMaster",
+    "model": "deepseek-coder-v2:16b",
+    "specialty": "Programming & Development",
+    "active": true
+  },
+  {
+    "name": "DataWizard",
+    "model": "qwen2.5:72b",
+    "specialty": "Data Analysis & Processing",
+    "active": true
+  },
+  {
+    "name": "WebCrawler",
+    "model": "dolphin-mixtral:8x7b",
+    "specialty": "Web Research & Intelligence",
+    "active": true
+  },
+  {
+    "name": "DocProcessor",
+    "model": "llama3.1:70b",
+    "specialty": "Document Analysis & Generation",
+    "active": true
+  },
+  {
+    "name": "VisionAI",
+    "model": "llava:34b",
+    "specialty": "Image & Visual Processing",
+    "active": true
+  },
+  {
+    "name": "MathGenius",
+    "model": "deepseek-math:7b",
+    "specialty": "Mathematical Computations",
+    "active": true
+  },
+  {
+    "name": "CreativeWriter",
+    "model": "nous-hermes2:34b",
+    "specialty": "Creative Content Generation",
+    "active": true
+  },
+  {
+    "name": "SystemAdmin",
+    "model": "codellama:34b",
+    "specialty": "System Administration",
+    "active": true
+  },
+  {
+    "name": "SecurityExpert",
+    "model": "mixtral:8x22b",
+    "specialty": "Cybersecurity Analysis",
+    "active": true
+  },
+  {
+    "name": "ResearchBot",
+    "model": "yi:34b",
+    "specialty": "Scientific Research",
+    "active": true
+  },
+  {
+    "name": "MultiLang",
+    "model": "qwen2.5-coder:32b",
+    "specialty": "Multilingual Processing",
+    "active": true
+  }
+]
+AGENTS_EOF
+    echo "Created agents.json in $INSTALL_DIR" | tee -a "$LOG"
+
+    progress "CREATING AGENT ORCHESTRATION SCRIPT (master_orchestrator.py)" # Clarified progress message
+    cat>"$INSTALL_DIR/agents/master_orchestrator.py"<<'EOF'
 import asyncio,json,requests,subprocess,threading,queue,time
 from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
 from dataclasses import dataclass
@@ -59,22 +356,32 @@ class Agent:
 
 class TerminusOrchestrator:
    def __init__(self):
-       self.agents=[
-           Agent("DeepThink","deepseek-r1:32b","Advanced Reasoning & Logic"),
-           Agent("CodeMaster","deepseek-coder-v2:16b","Programming & Development"),
-           Agent("DataWizard","qwen2.5:72b","Data Analysis & Processing"),
-           Agent("WebCrawler","dolphin-mixtral:8x7b","Web Research & Intelligence"),
-           Agent("DocProcessor","llama3.1:70b","Document Analysis & Generation"),
-           Agent("VisionAI","llava:34b","Image & Visual Processing"),
-           Agent("MathGenius","deepseek-math:7b","Mathematical Computations"),
-           Agent("CreativeWriter","nous-hermes2:34b","Creative Content Generation"),
-           Agent("SystemAdmin","codellama:34b","System Administration"),
-           Agent("SecurityExpert","mixtral:8x22b","Cybersecurity Analysis"),
-           Agent("ResearchBot","yi:34b","Scientific Research"),
-           Agent("MultiLang","qwen2.5-coder:32b","Multilingual Processing")
-       ]
-       self.ollama_url="http://localhost:11434/api/generate"
-       self.active_tasks={}
+       self.agents = []
+       # Path to agents.json, assuming master_orchestrator.py is in INSTALL_DIR/agents/
+       # and agents.json is in INSTALL_DIR
+       agents_file_path = Path(__file__).parent.parent / "agents.json"
+       try:
+           with open(agents_file_path, 'r') as f:
+               agents_data = json.load(f)
+           for agent_config in agents_data:
+               self.agents.append(Agent(
+                   name=agent_config.get('name'),
+                   model=agent_config.get('model'),
+                   specialty=agent_config.get('specialty'),
+                   active=agent_config.get('active', True) # Default to True if missing
+               ))
+       except FileNotFoundError:
+           print(f"ERROR: agents.json not found at {agents_file_path}. No agents loaded.")
+           # Optionally, load default agents or raise an error
+       except json.JSONDecodeError:
+           print(f"ERROR: Could not decode agents.json. Invalid JSON format. No agents loaded.")
+           # Optionally, load default agents or raise an error
+       except Exception as e:
+           print(f"ERROR: An unexpected error occurred while loading agents from agents.json: {e}. No agents loaded.")
+
+       # Ensure self.ollama_url and self.active_tasks are still initialized
+       self.ollama_url="http://localhost:11434/api/generate" # Keep this
+       self.active_tasks={} # Keep this
 
    async def execute_agent(self,agent:Agent,prompt:str,context:Dict=None)->Dict:
        try:
@@ -132,10 +439,12 @@ orchestrator=TerminusOrchestrator()
 doc_processor=DocumentUniverse()
 web_intel=WebIntelligence()
 EOF
+}
 
-# PHASE 4: QUANTUM INTERFACE NEXUS (30GB)
-progress "MATERIALIZING QUANTUM INTERFACE NEXUS"
-cat>"$INSTALL_DIR/terminus_ui.py"<<'EOF'
+# Function for generating terminus_ui.py
+create_terminus_ui_script() {
+    progress "CREATING TERMINUS UI SCRIPT"
+    cat>"$INSTALL_DIR/terminus_ui.py"<<'EOF'
 import streamlit as st,asyncio,json,time,os,subprocess
 from pathlib import Path
 import pandas as pd,plotly.express as px,plotly.graph_objects as go
@@ -232,12 +541,15 @@ def main():
 if __name__=="__main__":
    main()
 EOF
+}
 
-# PHASE 5: AUTONOMOUS DEVELOPMENT MATRIX (20GB)
-progress "DEPLOYING AUTONOMOUS DEVELOPMENT MATRIX"
-pip3 install black autopep8 flake8 mypy pytest coverage bandit safety
-cat>"$INSTALL_DIR/tools/auto_dev.py"<<'EOF'
-import subprocess,os,ast,json
+# Function for generating auto_dev.py
+create_auto_dev_script() {
+    progress "CREATING AUTO DEV SCRIPT"
+    echo "Installing auto_dev dependencies from $SCRIPT_DIR/dev_requirements.txt" | tee -a "$LOG"
+    pip3 install -r "$SCRIPT_DIR/dev_requirements.txt" || { echo "ERROR: Failed to install critical packages from $SCRIPT_DIR/dev_requirements.txt. Aborting. Check $LOG for details." | tee -a "$LOG"; exit 1; }
+    cat>"$INSTALL_DIR/tools/auto_dev.py"<<'EOF'
+import subprocess,os,ast,json,shlex
 from pathlib import Path
 
 class AutoDev:
@@ -260,17 +572,29 @@ class AutoDev:
            return {"functions":[n.name for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)],"classes":[n.name for n in ast.walk(tree) if isinstance(n,ast.ClassDef)],"lines":len(open(file_path).readlines())}
        except:return {"error":"Analysis failed"}
 
-   def run_command(self,cmd):
-       try:return subprocess.run(cmd,shell=True,capture_output=True,text=True).stdout
-       except:return "Command failed"
+   def run_command(self,cmd_string): # Renamed cmd to cmd_string for clarity
+       try:
+           cmd_list = shlex.split(cmd_string)
+           # Basic validation: Ensure the command is one of the known tools if possible,
+           # or ensure it does not contain metacharacters if not splitting.
+           # For now, we rely on shlex.split() to handle arguments safely.
+           # A more robust solution might involve checking cmd_list[0] against self.tools.values()
+           return subprocess.run(cmd_list, capture_output=True, text=True, check=True).stdout
+       except subprocess.CalledProcessError as e:
+           # Log error or return more specific error info
+           return f"Command failed with error: {e.stderr}"
+       except Exception as e:
+           return f"Command execution failed: {str(e)}"
 
 auto_dev=AutoDev()
 EOF
+}
 
-# PHASE 6: DATA UNIVERSE ENGINE (10GB)
-progress "CONSTRUCTING DATA UNIVERSE ENGINE"
-pip3 install dask distributed polars pyarrow fastparquet h5py tables
-cat>"$INSTALL_DIR/tools/data_engine.py"<<'EOF'
+# Function for generating data_engine.py
+create_data_engine_script() {
+    progress "CREATING DATA ENGINE SCRIPT"
+    # Dependencies (dask, distributed, polars, etc.) are expected to be installed via main requirements files.
+    cat>"$INSTALL_DIR/tools/data_engine.py"<<'EOF'
 import pandas as pd,numpy as np,json,sqlite3,redis,pymongo
 from pathlib import Path
 import plotly.express as px,plotly.graph_objects as go
@@ -301,11 +625,13 @@ class DataUniverse:
 
 data_engine=DataUniverse()
 EOF
+}
 
-# PHASE 7: QUANTUM NEURAL NETWORKS (5GB)
-progress "INITIALIZING QUANTUM NEURAL NETWORKS"
-pip3 install qiskit pennylane tensorflow-quantum cirq
-cat>"$INSTALL_DIR/core/quantum_engine.py"<<'EOF'
+# Function for generating quantum_engine.py
+create_quantum_engine_script() {
+    progress "CREATING QUANTUM ENGINE SCRIPT"
+    # Dependencies (qiskit, pennylane, etc.) are expected to be installed via main requirements files.
+    cat>"$INSTALL_DIR/core/quantum_engine.py"<<'EOF'
 import numpy as np
 from qiskit import QuantumCircuit,execute,Aer
 from qiskit.circuit.library import RealAmplitudes,ZZFeatureMap
@@ -334,10 +660,12 @@ class QuantumProcessor:
 
 quantum_proc=QuantumProcessor()
 EOF
+}
 
-# PHASE 8: NEURAL ARCHITECTURE SEARCH (3GB)
-progress "DEPLOYING NEURAL ARCHITECTURE SEARCH"
-cat>"$INSTALL_DIR/core/nas_engine.py"<<'EOF'
+# Function for generating nas_engine.py
+create_nas_engine_script() {
+    progress "CREATING NAS ENGINE SCRIPT"
+    cat>"$INSTALL_DIR/core/nas_engine.py"<<'EOF'
 import torch,torch.nn as nn,random
 
 class NASEngine:
@@ -377,11 +705,13 @@ class NASEngine:
 
 nas_engine=NASEngine()
 EOF
+}
 
-# PHASE 9: DISTRIBUTED COMPUTING MESH (2GB)
-progress "ESTABLISHING DISTRIBUTED COMPUTING MESH"
-pip3 install ray dask distributed celery
-cat>"$INSTALL_DIR/core/distributed_engine.py"<<'EOF'
+# Function for generating distributed_engine.py
+create_distributed_engine_script() {
+    progress "CREATING DISTRIBUTED ENGINE SCRIPT"
+    # Dependencies (ray, dask, distributed, celery) are expected to be installed via main requirements files.
+    cat>"$INSTALL_DIR/core/distributed_engine.py"<<'EOF'
 import ray,asyncio,threading,multiprocessing
 from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
 
@@ -418,11 +748,13 @@ class DistributedMesh:
 
 distributed_mesh=DistributedMesh()
 EOF
+}
 
-# PHASE 10: SECURITY & PRIVACY FORTRESS (2GB)
-progress "FORTIFYING SECURITY & PRIVACY SYSTEMS"
-pip3 install cryptography keyring bcrypt passlib
-cat>"$INSTALL_DIR/core/security_engine.py"<<'EOF'
+# Function for generating security_engine.py
+create_security_engine_script() {
+    progress "CREATING SECURITY ENGINE SCRIPT"
+    # Dependencies (cryptography, keyring, etc.) are expected to be installed via main requirements files.
+    cat>"$INSTALL_DIR/core/security_engine.py"<<'EOF'
 import hashlib,secrets,base64
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -457,10 +789,12 @@ class SecurityEngine:
 
 security_engine=SecurityEngine()
 EOF
+}
 
-# PHASE 11: MASTER LAUNCHER SYSTEM (1GB)
-progress "FINALIZING MASTER LAUNCHER SYSTEM"
-cat>"$INSTALL_DIR/launch_terminus.py"<<'EOF'
+# Function for generating launch_terminus.py
+create_launcher_script() {
+    progress "CREATING LAUNCHER SCRIPT"
+    cat>"$INSTALL_DIR/launch_terminus.py"<<'EOF'
 #!/usr/bin/env python3
 import subprocess,sys,os,time,threading,signal
 from pathlib import Path
@@ -471,6 +805,8 @@ class TerminusLauncher:
        self.base_dir=Path(__file__).parent
        self.processes={}
        self.running=True
+       self.restart_counts = {}
+       self.max_restarts = 5
 
    def start_ollama(self):
        print("Starting Ollama server...")
@@ -484,12 +820,30 @@ class TerminusLauncher:
 
    def monitor_system(self):
        while self.running:
-           for name,proc in self.processes.items():
-               if proc.poll() is not None:
-                   print(f"Process {name} crashed, restarting...")
-                   if name=='ollama':self.start_ollama()
-                   elif name=='streamlit':self.start_streamlit()
-           time.sleep(10)
+           for name, proc in list(self.processes.items()): # Ensure list() for safe iteration
+               if proc.poll() is not None: # Process has terminated
+                   current_restarts = self.restart_counts.get(name, 0)
+                   if current_restarts >= self.max_restarts:
+                       print(f"ERROR: Process {name} has crashed {current_restarts} times and exceeded max restart limit of {self.max_restarts}. Will not attempt to restart again.")
+                       # Optionally remove from self.processes or mark as failed
+                       # For example, to stop further checks on this failed process:
+                       del self.processes[name]
+                       continue
+
+                   self.restart_counts[name] = current_restarts + 1
+                   print(f"Process {name} (PID {proc.pid}) terminated unexpectedly. Restarting (attempt {self.restart_counts[name]}/{self.max_restarts})...")
+                   if name == 'ollama':
+                       self.start_ollama()
+                   elif name == 'streamlit':
+                       self.start_streamlit()
+                   # Add a small delay after a restart attempt to prevent rapid failing loops
+                   time.sleep(2)
+               else:
+                   # Process is running, reset its restart count if it was previously failing
+                   if self.restart_counts.get(name, 0) > 0:
+                       print(f"Process {name} is running normally. Resetting restart count.")
+                       self.restart_counts[name] = 0
+           time.sleep(10) # Check every 10 seconds
 
    def shutdown(self,signum=None,frame=None):
        print("\nShutting down Terminus AI...")
@@ -530,10 +884,12 @@ if __name__=="__main__":
 EOF
 
 chmod +x "$INSTALL_DIR/launch_terminus.py"
+}
 
-# PHASE 12: FINAL SYSTEM INTEGRATION
-progress "COMPLETING TERMINUS AI INTEGRATION"
-cat>"$INSTALL_DIR/README.md"<<'EOF'
+# Function for creating the final README and any other wrap-up tasks
+finalize_installation() {
+    progress "FINALIZING INSTALLATION & CREATING README"
+    cat>"$INSTALL_DIR/README.md"<<'EOF'
 # TERMINUS AI - ULTIMATE LOCAL AI ECOSYSTEM
 
 ## OPUS MAGNUM SPECIFICATIONS
@@ -549,3 +905,33 @@ cat>"$INSTALL_DIR/README.md"<<'EOF'
 ```bash
 cd ~/.terminus-ai
 python3 launch_terminus.py
+```
+EOF
+    echo "TERMINUS AI INSTALLATION COMPLETE. See README.md in $INSTALL_DIR for details." | tee -a "$LOG"
+}
+
+# Main execution flow
+main() {
+    initialize_setup
+    install_system_dependencies
+    install_python_core_libraries
+    install_python_framework_libraries
+    install_python_utility_libraries
+    install_ollama_and_dependencies
+    pull_ollama_models
+    create_agent_orchestration_script
+    create_terminus_ui_script
+    create_auto_dev_script
+    create_data_engine_script
+    create_quantum_engine_script
+    create_nas_engine_script
+    create_distributed_engine_script
+    create_security_engine_script
+    create_launcher_script
+    finalize_installation
+
+    echo "ALL STAGES COMPLETED SUCCESSFULLY!" | tee -a "$LOG"
+}
+
+# Run the main function
+main

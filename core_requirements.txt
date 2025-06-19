@@ -1,0 +1,24 @@
+torch==2.1.0
+torchvision==0.16.0
+torchaudio==2.1.0
+transformers==4.35.0
+accelerate==0.25.0
+bitsandbytes==0.41.3
+optimum==1.16.1
+auto-gptq==0.6.0
+exllama2==0.0.11
+ctransformers==0.2.27
+llama-cpp-python==0.2.20
+sentence-transformers==2.2.2
+faiss-gpu==1.7.4
+chromadb==0.4.18
+qdrant-client==1.6.0
+weaviate-client==3.24.1
+pinecone-client==2.2.4
+
+# Added from script-generating functions
+qiskit==X.Y.Z
+pennylane==X.Y.Z
+tensorflow-quantum==X.Y.Z
+cirq==X.Y.Z
+ray==X.Y.Z
