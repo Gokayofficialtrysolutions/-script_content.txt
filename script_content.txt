@@ -8,7 +8,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 INSTALL_DIR="$HOME/.terminus-ai"
 LOG="$INSTALL_DIR/install.log"
-TOTAL=17 # Total number of main functions called by main()
+TOTAL=18 # Adjusted for two progress calls in create_agent_orchestration_script
 STEP=0
 
 # Function to display progress
@@ -39,10 +39,10 @@ initialize_setup() {
 install_system_dependencies() {
     progress "INSTALLING SYSTEM DEPENDENCIES" # Corresponds to old "INITIALIZING QUANTUM CORE SYSTEMS" (second part)
     if command -v apt &>/dev/null; then
-        sudo apt update && sudo apt install -y python3 python3-pip docker.io git curl wget build-essential cmake ninja-build nodejs npm golang rust-all-dev
+        sudo apt update && sudo apt install -y python3 python3-pip docker.io git curl wget build-essential cmake ninja-build nodejs npm golang rust-all-dev espeak libespeak1
     fi
     if command -v brew &>/dev/null; then
-        brew install python docker git curl wget cmake ninja nodejs go rust
+        brew install python docker git curl wget cmake ninja nodejs go rust espeak
     fi
     # Add more error checking here in later plan steps
 }
@@ -341,6 +341,12 @@ create_agent_orchestration_script() {
     "model": "diffusers/stable-diffusion-xl-base-1.0",
     "specialty": "Image Generation",
     "active": true
+  },
+  {
+    "name": "AudioMaestro",
+    "model": "pydub/pyttsx3",
+    "specialty": "Audio Processing & TTS",
+    "active": true
   }
 ]
 AGENTS_EOF
@@ -353,6 +359,8 @@ import torch
 import aiohttp
 from diffusers import DiffusionPipeline
 from moviepy.editor import VideoFileClip
+from pydub import AudioSegment
+import pyttsx3
 import shutil # Added for file backup operations
 from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
 from dataclasses import dataclass
@@ -399,6 +407,15 @@ class TerminusOrchestrator:
        # Video Processing Setup
        self.video_processing_dir = Path(__file__).parent.parent / "data" / "video_outputs"
        self.video_processing_dir.mkdir(parents=True, exist_ok=True)
+
+       # Audio Processing Setup
+       self.audio_processing_dir = Path(__file__).parent.parent / "data" / "audio_outputs"
+       self.audio_processing_dir.mkdir(parents=True, exist_ok=True)
+       try:
+           self.tts_engine = pyttsx3.init()
+       except Exception as e:
+           print(f"WARNING: Failed to initialize TTS engine (pyttsx3): {e}. TTS functionality will be unavailable.")
+           self.tts_engine = None
 
    async def scaffold_new_project(self, project_name: str, project_type: str) -> Dict:
        if not project_name or not project_type:
@@ -554,11 +571,17 @@ class TerminusOrchestrator:
            print(f"Backup of original file created at: {backup_file_path}")
 
            llm_prompt = (
+               f"You are an expert programmer. Your task is to modify the given code based on a user request.\n"
                f"Original code from file '{safe_relative_file_path}':\n"
                f"```\n{original_code}\n```\n\n"
-               f"User request: {modification_instruction}\n\n"
-               f"Please provide the complete, modified code for the entire file based on the user request. "
-               f"Output only the raw code for the new file content, without any surrounding text, explanations, or markdown formatting."
+               f"User request for modification: {modification_instruction}\n\n"
+               f"Follow these instructions carefully:\n"
+               f"1. Apply the requested modification to the original code.\n"
+               f"2. If possible, make only the necessary changes to fulfill the request and keep the rest of the code intact. Avoid reformatting or changing unrelated parts of the code.\n"
+               f"3. If adding new functions or complex logic, include brief comments or docstrings for clarity, following the style of the original code if possible.\n"
+               f"4. If the request involves adding new functionality that might fail (e.g., file operations, network requests), include basic error handling (e.g., try-except blocks) where appropriate and idiomatic for the language.\n"
+               f"5. Ensure the modified code is syntactically correct and adheres to common best practices for the language of the original code.\n"
+               f"6. VERY IMPORTANT: Output *only* the complete, raw, modified code for the entire file. Do not include any surrounding text, explanations, apologies, or markdown formatting such as ```python ... ``` or similar, around the code block. Just the pure, new code content for the file.\n"
            )
 
            codemaster_agent = next((agent for agent in self.agents if agent.name == "CodeMaster"), None)
@@ -591,6 +614,164 @@ class TerminusOrchestrator:
            print(f"ERROR: {error_message}")
            backup_msg = f"Backup might be available at {backup_file_path}" if 'backup_file_path' in locals() else "No backup was made before error."
            return {"status": "error", "message": f"{error_message}. {backup_msg}"}
+
+   async def generate_code_module(self, requirements: str, language: str = "python") -> Dict:
+       if not requirements.strip():
+           return {"status": "error", "message": "Code generation requirements cannot be empty."}
+
+       print(f"Attempting to generate code module (language: {language}) for requirements: '{requirements[:100]}...'")
+       try:
+           llm_prompt = (
+               f"You are an expert programmer. Your task is to generate a complete code module or class structure in {language} "
+               f"based on the following requirements.\n\n"
+               f"Requirements:\n{requirements}\n\n"
+               f"Please adhere to these instructions:\n"
+               f"1. Generate well-structured, clean, and idiomatic code for the specified language.\n"
+               f"2. If the requirements imply a class, generate the class structure. If they imply a module with functions, generate that.\n"
+               f"3. Include necessary imports if they are common and obvious for the tasks described.\n"
+               f"4. Add brief comments or docstrings to explain major components (classes, functions, complex logic), following typical conventions for {language}.\n"
+               f"5. Ensure the generated code is syntactically correct.\n"
+               f"6. VERY IMPORTANT: Output *only* the complete, raw code for the module/class. Do not include any surrounding text, explanations, apologies, or markdown formatting such as ```python ... ``` or similar, around the code block. Just the pure code.\n"
+           )
+
+           codemaster_agent = next((agent for agent in self.agents if agent.name == "CodeMaster"), None)
+           if not codemaster_agent:
+               return {"status": "error", "message": "CodeMaster agent not found."}
+
+           print(f"Sending code module generation task to CodeMaster ({codemaster_agent.model})...")
+           generation_result = await self.execute_agent(codemaster_agent, llm_prompt)
+
+           if generation_result.get("status") == "success":
+               generated_code = generation_result.get("response", "").strip()
+               if not generated_code:
+                    return {"status": "error", "message": "CodeMaster returned empty code for the module."}
+
+               print("Code module generated successfully.")
+               return {"status": "success", "message": "Code module generated successfully.", "generated_code": generated_code}
+           else:
+               err_msg = generation_result.get('response', 'CodeMaster failed to generate the code module.')
+               print(f"CodeMaster execution for module generation failed: {err_msg}")
+               return {"status": "error", "message": f"CodeMaster failed: {err_msg}"}
+
+       except Exception as e:
+           error_message = f"Failed to generate code module: {str(e)}"
+           print(f"ERROR: {error_message}")
+           return {"status": "error", "message": error_message}
+
+   async def explain_code_snippet(self, code_snippet: str, language: str = "python") -> Dict:
+       if not code_snippet.strip():
+           return {"status": "error", "message": "Code snippet cannot be empty."}
+
+       print(f"Attempting to explain code snippet (language: {language}): '{code_snippet[:100]}...'")
+       try:
+           llm_prompt = (
+               f"You are an expert programmer. Your task is to explain the following code snippet written in {language}.\n\n"
+               f"Code Snippet:\n```\n{code_snippet}\n```\n\n"
+               f"Please provide a clear, concise, and informative explanation of what this code does, its purpose, and how it works. "
+               f"If there are complex parts, break them down. If there are potential improvements or issues, you can mention them briefly. "
+               f"Format your explanation clearly, perhaps using markdown for readability (e.g., headings, bullet points if appropriate)."
+           )
+
+           explainer_agent = next((agent for agent in self.agents if agent.name == "CodeMaster"), None)
+           if not explainer_agent:
+               explainer_agent = next((agent for agent in self.agents if agent.name == "DeepThink"), None)
+
+           if not explainer_agent:
+               return {"status": "error", "message": "Suitable agent for code explanation not found."}
+
+           print(f"Sending code explanation task to {explainer_agent.name} ({explainer_agent.model})...")
+           explanation_result = await self.execute_agent(explainer_agent, llm_prompt)
+
+           if explanation_result.get("status") == "success":
+               explanation_text = explanation_result.get("response", "").strip()
+               if not explanation_text:
+                    return {"status": "error", "message": f"{explainer_agent.name} returned an empty explanation."}
+
+               print("Code explanation generated successfully.")
+               return {"status": "success", "message": "Code explained successfully.", "explanation": explanation_text}
+           else:
+               err_msg = explanation_result.get('response', f'{explainer_agent.name} failed to explain the code.')
+               print(f"{explainer_agent.name} execution for code explanation failed: {err_msg}")
+               return {"status": "error", "message": f"{explainer_agent.name} failed: {err_msg}"}
+
+       except Exception as e:
+           error_message = f"Failed to explain code snippet: {str(e)}"
+           print(f"ERROR: {error_message}")
+           return {"status": "error", "message": error_message}
+
+   async def get_audio_info(self, audio_path: str) -> Dict:
+       try:
+           target_audio_path = Path(audio_path)
+           if not target_audio_path.is_file():
+               return {"status": "error", "message": f"Audio file not found: {audio_path}"}
+
+           audio = AudioSegment.from_file(str(target_audio_path))
+           info = {
+               "filename": target_audio_path.name,
+               "duration_seconds": len(audio) / 1000.0,
+               "channels": audio.channels,
+               "frame_rate_hz": audio.frame_rate,
+               "sample_width_bytes": audio.sample_width,
+               "max_amplitude": audio.max,
+           }
+           return {"status": "success", "message": "Audio information extracted.", "info": info}
+       except Exception as e:
+           return {"status": "error", "message": f"Failed to get audio info for '{audio_path}': {str(e)}"}
+
+   async def convert_audio_format(self, audio_path: str, target_format: str = "mp3") -> Dict:
+       try:
+           target_audio_path = Path(audio_path)
+           if not target_audio_path.is_file():
+               return {"status": "error", "message": f"Audio file not found: {audio_path}"}
+
+           target_format = target_format.lower().strip(".")
+           if not target_format:
+               return {"status": "error", "message": "Target format cannot be empty."}
+
+           audio = AudioSegment.from_file(str(target_audio_path))
+
+           output_filename = f"{target_audio_path.stem}_converted.{target_format}"
+           output_path = self.audio_processing_dir / output_filename
+
+           audio.export(str(output_path), format=target_format)
+
+           return {"status": "success", "message": f"Audio converted to {target_format}: {output_path}", "output_path": str(output_path)}
+       except Exception as e:
+           return {"status": "error", "message": f"Failed to convert audio '{audio_path}' to '{target_format}': {str(e)}"}
+
+   async def text_to_speech(self, text_to_speak: str, output_filename_stem: str = "tts_output") -> Dict:
+       if not self.tts_engine:
+           return {"status": "error", "message": "TTS engine not initialized. Cannot perform text-to-speech."}
+       if not text_to_speak.strip():
+           return {"status": "error", "message": "Text for TTS cannot be empty."}
+       if not output_filename_stem.strip():
+           output_filename_stem = "tts_output" # Default if empty after strip
+
+       # Sanitize filename stem
+       safe_filename_stem = "".join(c if c.isalnum() or c in ['_', '-'] else '_' for c in output_filename_stem)
+       if not safe_filename_stem: safe_filename_stem = "tts_output"
+
+       output_filename = f"{safe_filename_stem}.mp3" # pyttsx3 often saves as mp3 by default or can do wav
+       output_path = self.audio_processing_dir / output_filename
+
+       try:
+           print(f"Generating speech for: '{text_to_speak[:50]}...' -> {output_path}")
+           self.tts_engine.save_to_file(text_to_speak, str(output_path))
+           self.tts_engine.runAndWait() # Crucial for pyttsx3 to actually save the file
+
+           # Verify file creation as runAndWait might not throw error for all engine issues
+           if not output_path.is_file() or output_path.stat().st_size == 0:
+               # Attempt with a .wav extension as a fallback for some engines/OS if mp3 failed
+               output_filename = f"{safe_filename_stem}.wav"
+               output_path = self.audio_processing_dir / output_filename
+               self.tts_engine.save_to_file(text_to_speak, str(output_path))
+               self.tts_engine.runAndWait()
+               if not output_path.is_file() or output_path.stat().st_size == 0:
+                   return {"status": "error", "message": "TTS file generation failed or produced empty file, even after trying .wav."}
+
+           return {"status": "success", "message": f"Speech saved to {output_path}", "speech_path": str(output_path)}
+       except Exception as e:
+           return {"status": "error", "message": f"Failed to generate speech: {str(e)}"}
 
    async def generate_image_with_diffusion(self, prompt: str) -> Dict:
        if self.image_gen_pipeline is None:
@@ -662,48 +843,83 @@ class TerminusOrchestrator:
    async def parallel_execution(self, prompt: str, selected_agents: List[str] = None, context: Dict = None) -> List[Dict]:
        prompt_lower = prompt.lower()
        active_agents_list = []
-       agent_selection_reason = "User selected"
+       agent_selection_reason = "User selected" # Default reason
+
+       # Use a set to keep track of names to avoid duplicate Agent objects
+       determined_agent_names = set()
+       determined_agent_objects = []
 
        if not selected_agents:
+           # 1. Primary Context-Based Selection
+           if context and 'current_mode' in context:
+               mode_to_primary_agent = {
+                   "Image Generation": "ImageForge",
+                   "Video Processing": "VideoCrafter", # Assuming this agent name exists
+                   "Audio Processing": "AudioMaestro",
+                   "Code Generation": "CodeMaster",
+                   "Document Processing": "DocProcessor",
+                   "Web Intelligence": "WebCrawler",
+                   # Add other relevant modes if they have a clear primary agent
+               }
+               current_mode = context.get("current_mode")
+               if current_mode and current_mode in mode_to_primary_agent:
+                   primary_agent_name = mode_to_primary_agent[current_mode]
+                   agent_obj = next((a for a in self.agents if a.name == primary_agent_name and a.active), None)
+                   if agent_obj:
+                       determined_agent_objects.append(agent_obj)
+                       determined_agent_names.add(agent_obj.name)
+                       agent_selection_reason = f"Context: Mode '{current_mode}'"
+
+           # 2. Secondary Keyword-Based Selection
            agent_keywords = {
                "ImageForge": ["image of", "picture of", "draw a", "generate art", "create a photo", "generate image"],
-               "CodeMaster": ["python code for", "write a script to", "generate a function that", "develop a program to", "code snippet for"],
+               "CodeMaster": ["python code for", "write a script to", "generate a function that", "develop a program to", "code snippet for", "explain code", "generate module"],
                "DataWizard": ["analyze data", "statistics for csv", "excel report on", "plot data from", "database insights"],
                "WebCrawler": ["search the web for", "find information online about", "what's the latest on", "look up on internet"],
                "DocProcessor": ["summarize document", "analyze this text", "process pdf content", "read file content"],
                "MathGenius": ["calculate", "solve math", "what is the result of", "compute"],
+               "AudioMaestro": ["audio", "sound", "music", "speech", "tts", "text to speech", "voice"],
+               # Add other agent keywords as needed
            }
 
-           determined_agent_objects = []
-           # Use a set to keep track of names to avoid duplicate Agent objects
-           determined_agent_names = set()
-
+           keyword_selected_agents = []
            for agent_name, keywords in agent_keywords.items():
                if any(keyword in prompt_lower for keyword in keywords):
                    agent_obj = next((a for a in self.agents if a.name == agent_name and a.active), None)
-                   if agent_obj and agent_obj.name not in determined_agent_names:
-                       determined_agent_objects.append(agent_obj)
+                   if agent_obj and agent_obj.name not in determined_agent_names: # Add if not already added by context
+                       keyword_selected_agents.append(agent_obj)
                        determined_agent_names.add(agent_obj.name)
 
+           if keyword_selected_agents:
+               determined_agent_objects.extend(keyword_selected_agents)
+               if "Context: Mode" in agent_selection_reason : # If context already set a reason
+                   agent_selection_reason += " & Keywords"
+               else:
+                   agent_selection_reason = "Keywords recognized"
+
+           # Assign to active_agents_list if any were determined
            if determined_agent_objects:
                active_agents_list = determined_agent_objects
-               agent_selection_reason = "Intent recognized"
-           else:
+           else: # Fallback if neither context nor keywords selected agents
                default_general_agents = ["DeepThink", "CreativeWriter"]
                active_agents_list = [a for a in self.agents if a.name in default_general_agents and a.active]
                agent_selection_reason = "Default general agents"
 
-               if not active_agents_list: # If default general agents are not active or found
-                   active_agents_list = [a for a in self.agents if a.active] # Fallback to all active agents
+               if not active_agents_list:
+                   active_agents_list = [a for a in self.agents if a.active]
                    agent_selection_reason = "Fallback to all active"
-       else:
-           active_agents_list = [a for a in self.agents if a.name in selected_agents and a.active]
 
-       if not active_agents_list:
+       else: # User explicitly selected agents
+           active_agents_list = [a for a in self.agents if a.name in selected_agents and a.active]
+           # agent_selection_reason remains "User selected"
+
+       if not active_agents_list: # Final check if any active agents are available
            print("No active agents determined for the prompt. Cannot execute.")
            return [{"agent": "System", "model": "N/A", "response": "No suitable active agents found for your request.", "status": "error"}]
 
-       print(f"Agents selected for prompt '{prompt[:50]}...': {[a.name for a in active_agents_list]} (Reason: {agent_selection_reason})")
+       # Refined logging for agent selection
+       selected_agent_names = [a.name for a in active_agents_list]
+       print(f"Executing with agents: {selected_agent_names} for prompt '{prompt[:50]}...'. Reason: {agent_selection_reason}.")
 
        tasks = [self.execute_agent(agent, prompt, context) for agent in active_agents_list]
        results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -800,7 +1016,7 @@ def main():
    # Sidebar Controls
    with st.sidebar:
        st.header("COMMAND CENTER")
-       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Image Generation", "Video Processing", "Code Generation","Data Analysis","Creative Suite"])
+       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Image Generation", "Video Processing", "Audio Processing", "Code Generation","Data Analysis","Creative Suite"])
 
        st.subheader("Agent Selection")
        agent_names=[a.name for a in orchestrator.agents]
@@ -820,9 +1036,11 @@ def main():
            user_prompt=st.text_area("Enter your command:",height=200,placeholder="Ask anything - the entire AI constellation will respond...")
 
            if st.button("EXECUTE ALL AGENTS",type="primary"):
-               if user_prompt and selected_agents:
+               if user_prompt: # selected_agents can be empty for intent recognition
                    with st.spinner("Processing across AI constellation..."):
-                       results=asyncio.run(orchestrator.parallel_execution(user_prompt,selected_agents))
+                       current_context = {"current_mode": operation_mode}
+                       # If selected_agents is empty, orchestrator will use intent recognition
+                       results=asyncio.run(orchestrator.parallel_execution(prompt=user_prompt, selected_agents=selected_agents, context=current_context))
 
                        if consensus_mode:
                            consensus=orchestrator.consensus_analysis(results)
@@ -960,7 +1178,7 @@ def main():
 
        st.markdown("### 🏗️ Scaffold New Project")
 
-       project_name = st.text_input("Enter Project Name:", placeholder="e.g., my_new_cli_app")
+       project_name = st.text_input("Enter Project Name:", placeholder="e.g., my_new_cli_app", key="scaffold_project_name_v2")
 
        project_type_options = {
            "Python CLI (Typer)": "python_cli",
@@ -970,15 +1188,14 @@ def main():
        }
        display_project_type = st.selectbox(
            "Select Project Type:",
-           options=list(project_type_options.keys())
+           options=list(project_type_options.keys()),
+           key="scaffold_project_type_v2"
        )
        selected_project_type_value = project_type_options[display_project_type]
 
-       if st.button("Scaffold Project", type="primary"):
+       if st.button("Scaffold Project", type="primary", key="scaffold_button_v2"):
            if project_name and selected_project_type_value:
                with st.spinner(f"Scaffolding '{project_name}' as {display_project_type}..."):
-                   # Call the new orchestrator method
-                   # orchestrator should be globally available or part of a session state
                    result = asyncio.run(orchestrator.scaffold_new_project(
                        project_name=project_name,
                        project_type=selected_project_type_value
@@ -1040,6 +1257,115 @@ def main():
                        st.error(result.get("message", "Code modification failed."))
            else:
                st.warning("Please provide Project Name, File Path, and Modification Instruction.")
+
+       st.markdown("---")
+       st.markdown("### 🧠 Explain Code Snippet")
+       explain_code_input = st.text_area("Enter code snippet to explain:", height=200, key="explain_code_input_v2") # v2 key
+       explain_lang_input = st.text_input("Language (e.g., python, javascript):", value="python", key="explain_lang_input_v2") # v2 key
+
+       if st.button("Explain Code", key="explain_code_button_v2"): # v2 key
+           if explain_code_input and explain_lang_input:
+               with st.spinner(f"Thinking... explaining snippet in {explain_lang_input}"):
+                   result = asyncio.run(orchestrator.explain_code_snippet(explain_code_input, explain_lang_input))
+                   if result and result.get("status") == "success":
+                       st.success("Explanation received:")
+                       st.markdown(result.get("explanation"))
+                   else:
+                       st.error(result.get("message", "Failed to get explanation."))
+           else:
+               st.warning("Please enter a code snippet and specify the language.")
+
+       st.markdown("---")
+       st.markdown("### ✨ Generate Code Module/Class")
+       gen_requirements_input = st.text_area("Describe the module/class requirements:", height=200, key="gen_requirements_input_v2") # v2 key
+       gen_lang_input = st.text_input("Language (e.g., python):", value="python", key="gen_lang_input_v2") # v2 key
+
+       if st.button("Generate Code Module", key="gen_module_button_v2"): # v2 key
+           if gen_requirements_input and gen_lang_input:
+               with st.spinner(f"Generating {gen_lang_input} module..."):
+                   result = asyncio.run(orchestrator.generate_code_module(gen_requirements_input, gen_lang_input))
+                   if result and result.get("status") == "success":
+                       st.success("Code module generated:")
+                       st.code(result.get("generated_code"), language=gen_lang_input.lower() if gen_lang_input else "python")
+                   else:
+                       st.error(result.get("message", "Failed to generate code module."))
+           else:
+               st.warning("Please describe the requirements and specify the language for the module.")
+
+   elif operation_mode == "Audio Processing":
+       st.subheader("🎤 AUDIO PROCESSING SUITE")
+       audio_task = st.selectbox("Select Audio Task:", ["Get Audio Info", "Convert Audio Format", "Text-to-Speech (TTS)"], key="audio_task_select")
+
+       if audio_task == "Get Audio Info" or audio_task == "Convert Audio Format":
+           uploaded_audio = st.file_uploader("Upload an audio file", type=['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a'], key="audio_upload_inf_conv")
+           if uploaded_audio is not None:
+               temp_audio_dir = Path(__file__).parent / "temp_uploads"
+               temp_audio_dir.mkdir(parents=True, exist_ok=True)
+               temp_audio_path = temp_audio_dir / uploaded_audio.name
+               with open(temp_audio_path, "wb") as f:
+                   f.write(uploaded_audio.getbuffer())
+               st.audio(str(temp_audio_path))
+
+               if audio_task == "Get Audio Info":
+                   if st.button("Get Information", key="get_audio_info_button"):
+                       with st.spinner("Fetching audio information..."):
+                           result = asyncio.run(orchestrator.get_audio_info(str(temp_audio_path)))
+                           if result and result.get("status") == "success":
+                               st.success(result.get("message"))
+                               st.json(result.get("info"))
+                           else:
+                               st.error(result.get("message", "Failed to get audio info."))
+
+               elif audio_task == "Convert Audio Format":
+                   target_format_options = ["mp3", "wav", "ogg", "flac"]
+                   convert_target_format = st.selectbox("Select Target Format:", target_format_options, key="convert_audio_format_select")
+                   if st.button("Convert Format", key="convert_audio_button"):
+                       with st.spinner(f"Converting to {convert_target_format}..."):
+                           result = asyncio.run(orchestrator.convert_audio_format(str(temp_audio_path), convert_target_format))
+                           if result and result.get("status") == "success":
+                               st.success(result.get("message"))
+                               st.audio(result.get("output_path"))
+                               # try:
+                               #     with open(result.get("output_path"), "rb") as fp:
+                               #         st.download_button(
+                               #             label="Download Converted File",
+                               #             data=fp,
+                               #             file_name=Path(result.get("output_path")).name,
+                               #             mime=f"audio/{convert_target_format}"
+                               #         )
+                               # except FileNotFoundError:
+                               #     st.error(f"Converted file not found at {result.get('output_path')}. Cannot offer download.")
+                               # except Exception as e:
+                               #     st.error(f"Error preparing download: {e}")
+                           else:
+                               st.error(result.get("message", "Failed to convert audio."))
+
+       elif audio_task == "Text-to-Speech (TTS)":
+           tts_text = st.text_area("Enter text to convert to speech:", height=150, key="tts_text_input")
+           tts_output_filename_stem = st.text_input("Output filename (without extension):", value="speech_output", key="tts_filename_stem")
+           if st.button("Generate Speech", key="tts_generate_button"):
+               if tts_text.strip() and tts_output_filename_stem.strip():
+                   with st.spinner("Generating speech..."):
+                       result = asyncio.run(orchestrator.text_to_speech(tts_text, tts_output_filename_stem))
+                       if result and result.get("status") == "success":
+                           st.success(result.get("message"))
+                           st.audio(result.get("speech_path"))
+                           # try:
+                           #     with open(result.get("speech_path"), "rb") as fp:
+                           #         st.download_button(
+                           #             label="Download Speech",
+                           #             data=fp,
+                           #             file_name=Path(result.get("speech_path")).name,
+                           #             mime="audio/mpeg" # Assuming mp3, adjust if wav fallback is common
+                           #         )
+                           # except FileNotFoundError:
+                           #     st.error(f"Speech file not found at {result.get('speech_path')}. Cannot offer download.")
+                           # except Exception as e:
+                           #     st.error(f"Error preparing download: {e}")
+                       else:
+                           st.error(result.get("message", "Failed to generate speech."))
+               else:
+                   st.warning("Please enter text and a filename stem.")
 
 if __name__=="__main__":
    main()
