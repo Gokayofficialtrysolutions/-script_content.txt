@@ -992,13 +992,54 @@ def main():
            else:
                st.warning("Please enter a project name and select a project type.")
 
-       st.markdown("---")
-       st.markdown("### 🤖 AI-Assisted Code Generation (Future Feature)")
-       st.info("The ability to generate code snippets or refine existing code using AI agents will be developed here.")
-       # Placeholder for future AI code gen using CodeMaster LLM capabilities
-       # existing_code_prompt = st.text_area("Enter prompt for CodeMaster (e.g., 'Write a Python function to sort a list'):", height=150)
-       # if st.button("Generate with CodeMaster"):
-       #     st.info("CodeMaster (LLM) generation not fully implemented in this UI section yet.")
+       st.markdown("---") # Separator from project scaffolding
+       st.markdown("### ⚙️ AI-Assisted Code Modification (Experimental)")
+
+       st.warning(
+           "**Experimental Feature:** AI code modification can be unpredictable. "
+           "Always review changes carefully. Backups of original files (with a .bak_timestamp suffix) "
+           "are created in the same directory."
+       )
+
+       mod_project_name = st.text_input(
+           "Project Name (must exist in Terminus AI root):",
+           placeholder="e.g., my_fastapi_app"
+       )
+       mod_relative_file_path = st.text_input(
+           "File Path within Project (e.g., main.py or app/main.py):",
+           placeholder="e.g., main.py"
+       )
+       mod_instruction = st.text_area(
+           "Modification Instruction (be specific):",
+           height=150,
+           placeholder="e.g., Add a new FastAPI GET endpoint to '/status' that returns {'status': 'ok'}"
+       )
+
+       if st.button("Attempt Code Modification", key="attempt_code_mod_button"):
+           if mod_project_name and mod_relative_file_path and mod_instruction:
+               with st.spinner(f"Attempting to modify '{mod_relative_file_path}' in project '{mod_project_name}'..."):
+                   result = asyncio.run(orchestrator.modify_code_in_project(
+                       project_name=mod_project_name,
+                       relative_file_path=mod_relative_file_path,
+                       modification_instruction=mod_instruction
+                   ))
+
+                   if result and result.get("status") == "success":
+                       st.success(result.get("message", "Code modification attempted successfully!"))
+                       if result.get("modified_file"):
+                           st.info(f"Modified file: {result.get('modified_file')}")
+                           # Optionally, try to read and display the modified code if it's not too large
+                           # try:
+                           #     with open(result.get("modified_file"), "r", encoding="utf-8") as f:
+                           #         modified_code_content = f.read()
+                           #     with st.expander("View Modified Code", expanded=False):
+                           #         st.code(modified_code_content, language="python")
+                           # except Exception as e_read:
+                           #     st.warning(f"Could not display modified code: {e_read}")
+                   else:
+                       st.error(result.get("message", "Code modification failed."))
+           else:
+               st.warning("Please provide Project Name, File Path, and Modification Instruction.")
 
 if __name__=="__main__":
    main()
