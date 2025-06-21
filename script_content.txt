@@ -373,6 +373,8 @@ from dataclasses import dataclass
 from typing import List,Dict,Any,Optional
 from pathlib import Path
 from transformers import pipeline as hf_pipeline
+import sys # For platform detection
+import re # For parsing 'top N' processes
 from tools.auto_dev import auto_dev # Added for project scaffolding
 # streamlit and pandas are not directly used here but in the UI script that imports this.
 
@@ -849,9 +851,124 @@ class TerminusOrchestrator:
            print(f"ERROR: Failed to generate image: {str(e)}")
            return {"agent": "ImageForge", "response": f"Error generating image: {str(e)}", "status": "error", "image_path": None}
 
+   async def get_disk_space(self) -> Dict:
+       command = ["df", "-h"]
+       try:
+           if not shutil.which(command[0]):
+               return {"status": "error", "data": f"Command '{command[0]}' not found.", "message": f"Command '{command[0]}' not found."}
+           process = await asyncio.create_subprocess_exec(
+               *command,
+               stdout=asyncio.subprocess.PIPE,
+               stderr=asyncio.subprocess.PIPE
+           )
+           stdout, stderr = await process.communicate()
+           if process.returncode == 0:
+               return {"status": "success", "data": stdout.decode(), "message": "Disk space information retrieved."}
+           else:
+               return {"status": "error", "data": stderr.decode(), "message": f"Error getting disk space: {stderr.decode()}"}
+       except Exception as e:
+           return {"status": "error", "data": str(e), "message": f"Failed to get disk space: {str(e)}"}
+
+   async def get_memory_usage(self) -> Dict:
+       command = []
+       os_type = sys.platform
+       if os_type == "linux" or os_type == "linux2":
+           if shutil.which("free"):
+               command = ["free", "-h"]
+           else:
+                return {"status": "error", "data": "Command 'free' not found on Linux.", "message": "Command 'free' not found on Linux."}
+       elif os_type == "darwin": # macOS
+           if shutil.which("vm_stat"):
+               command = ["vm_stat"]
+           else:
+               return {"status": "error", "data": "Command 'vm_stat' not found on macOS.", "message": "Command 'vm_stat' not found on macOS."}
+       else:
+           return {"status": "error", "data": f"Memory usage command not supported on this OS: {os_type}", "message": f"Memory usage command not supported on this OS: {os_type}"}
+
+       try:
+           process = await asyncio.create_subprocess_exec(
+               *command,
+               stdout=asyncio.subprocess.PIPE,
+               stderr=asyncio.subprocess.PIPE
+           )
+           stdout, stderr = await process.communicate()
+           if process.returncode == 0:
+               return {"status": "success", "data": stdout.decode(), "message": "Memory usage information retrieved."}
+           else:
+               return {"status": "error", "data": stderr.decode(), "message": f"Error getting memory usage: {stderr.decode()}"}
+       except Exception as e:
+           return {"status": "error", "data": str(e), "message": f"Failed to get memory usage: {str(e)}"}
+
+   async def get_top_processes(self, n: int = 10) -> Dict:
+       if not isinstance(n, int) or n <= 0:
+           n = 10
+
+       os_type = sys.platform
+       cmd_ps_list = []
+       if os_type == "linux" or os_type == "linux2":
+           cmd_ps_list = ["ps", "aux", "--sort=-%cpu"]
+       elif os_type == "darwin":
+           cmd_ps_list = ["ps", "aux", "-r"]
+       else:
+           return {"status": "error", "data": f"Top processes command not supported on this OS: {os_type}", "message": f"Top processes command not supported on this OS: {os_type}"}
+
+       cmd_head_list = ["head", f"-n{n+1}"]
+
+       if not shutil.which(cmd_ps_list[0]) or not shutil.which(cmd_head_list[0]):
+            return {"status": "error", "data": f"Required command '{cmd_ps_list[0]}' or '{cmd_head_list[0]}' not found.", "message": f"Required command '{cmd_ps_list[0]}' or '{cmd_head_list[0]}' not found."}
+
+       try:
+           ps_process = await asyncio.create_subprocess_exec(
+               *cmd_ps_list,
+               stdout=asyncio.subprocess.PIPE,
+               stderr=asyncio.subprocess.PIPE
+           )
+
+           head_process = await asyncio.create_subprocess_exec(
+               *cmd_head_list,
+               stdin=ps_process.stdout,
+               stdout=asyncio.subprocess.PIPE,
+               stderr=asyncio.subprocess.PIPE
+           )
+
+           if ps_process.stdout:
+               ps_process.stdout.close()
+
+           stdout, stderr_head = await head_process.communicate()
+           _, stderr_ps = await ps_process.communicate()
+
+           if head_process.returncode == 0 and ps_process.returncode == 0 :
+               return {"status": "success", "data": stdout.decode(), "message": f"Top {n} processes retrieved."}
+           else:
+               error_output = f"ps error: {stderr_ps.decode().strip() if stderr_ps else 'N/A'}. head error: {stderr_head.decode().strip() if stderr_head else 'N/A'}."
+               return {"status": "error", "data": error_output, "message": f"Error getting top processes: {error_output}"}
+       except Exception as e:
+           return {"status": "error", "data": str(e), "message": f"Failed to get top processes: {str(e)}"}
+
    async def execute_agent(self, agent: Agent, prompt: str, context: Dict = None) -> Dict:
        if agent.name == "ImageForge": # Or use agent.specialty == "Image Generation"
            return await self.generate_image_with_diffusion(prompt)
+       elif agent.name == "SystemAdmin":
+           prompt_lower = prompt.lower().strip()
+           if "disk space" in prompt_lower or "disk usage" in prompt_lower:
+               return await self.get_disk_space()
+           elif "memory usage" in prompt_lower or "ram usage" in prompt_lower or "free memory" in prompt_lower:
+               return await self.get_memory_usage()
+           elif "top processes" in prompt_lower or "running processes" in prompt_lower:
+               num_processes = 10 # default
+               try:
+                   match = re.search(r"top\s*(\d+)\s*processes", prompt_lower)
+                   if match and match.group(1):
+                       num_processes = int(match.group(1))
+               except Exception:
+                   pass
+               return await self.get_top_processes(n=num_processes)
+           else:
+               return {
+                   "status": "info",
+                   "agent": "SystemAdmin",
+                   "response": f"SystemAdmin received: '{prompt}'. Command not recognized for direct execution. Supported commands: 'disk space', 'memory usage', 'top N processes'. For other queries, ensure SystemAdmin uses an LLM."
+               }
        else:
            try:
                payload = {"model": agent.model, "prompt": f"[{agent.specialty}] {prompt}", "stream": False, "options": {"temperature": 0.7}}
@@ -1072,7 +1189,6 @@ class TerminusOrchestrator:
                    f"{first_attempt_intent_info}\n\n"
                    f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
                    f"Based on the user request and ONLY the agents listed above, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
-                   # ... (rest of JSON structure definition as before)
                    f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
                    f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
                    f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
@@ -1262,116 +1378,6 @@ class TerminusOrchestrator:
            self.conversation_history = self.conversation_history[-self.max_history_items:]
 
        return final_execution_results
-
-class DocumentUniverse:
-           f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
-           f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
-           f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
-           f"  - 'dependencies': (Optional, List[Integer]) A list of 'step_id's that this step depends on. The outputs of these dependency steps can be referenced in the 'task_prompt' using {{{{output_variable_name_of_dependency_step}}}} syntax if needed. For now, assume sequential execution if dependencies are complex to manage.\n"
-           f"  - 'output_variable_name': (Optional, String) A descriptive variable name (e.g., 'analysis_result', 'generated_image_path') to store the primary output of this step. This can be used by subsequent dependent steps.\n\n"
-           f"Example of a step: {{'step_id': 1, 'agent_name': 'WebCrawler', 'task_prompt': 'Search for recent news about topic X.', 'output_variable_name': 'news_summary'}}\n"
-           f"Example of a dependent step: {{'step_id': 2, 'agent_name': 'CreativeWriter', 'task_prompt': 'Write a blog post based on this summary: {{{{news_summary}}}}', 'dependencies': [1]}}\n\n"
-           f"IMPORTANT: Output ONLY the JSON plan as a raw string. Do not include any other text, explanations, or markdown formatting. The JSON must be a valid list of objects.\n"
-           f"If the user request is simple and can be handled by a single agent directly, create a one-step plan. If the request is ambiguous or cannot be planned, return an empty JSON list []."
-       )
-
-       print("Prompting MasterPlanner...")
-       plan_generation_result = await self.execute_agent(master_planner_agent, planner_prompt)
-
-       if plan_generation_result.get("status") != "success":
-           return [{"status": "error", "agent": "MasterPlanner", "response": f"MasterPlanner failed to generate a plan: {plan_generation_result.get('response')}"}]
-
-       plan_json_str = plan_generation_result.get("response", "").strip()
-       print(f"MasterPlanner returned plan (raw): {plan_json_str[:500]}...")
-
-       if not plan_json_str:
-            return [{"status": "error", "agent": "MasterPlanner", "response": "MasterPlanner returned an empty plan string."}]
-
-       try:
-           plan = json.loads(plan_json_str)
-           if not isinstance(plan, list):
-               if isinstance(plan, dict) and 'plan' in plan and isinstance(plan['plan'], list):
-                   plan = plan['plan']
-               else:
-                   raise ValueError("Plan is not a JSON list.")
-       except json.JSONDecodeError as e:
-           print(f"JSONDecodeError parsing plan: {e}. Raw response: {plan_json_str}")
-           return [{"status": "error", "agent": "MasterPlanner", "response": f"Failed to parse plan from MasterPlanner (JSONDecodeError): {e}. Response: {plan_json_str[:200]}"}]
-       except ValueError as e:
-           print(f"ValueError parsing plan: {e}. Raw response: {plan_json_str}")
-           return [{"status": "error", "agent": "MasterPlanner", "response": f"Plan format error: {e}. Response: {plan_json_str[:200]}"}]
-
-       if not plan:
-           print("MasterPlanner returned an empty plan list, indicating request might be simple or unplannable.")
-           return [{"status": "info", "agent": "MasterPlanner", "response": "MasterPlanner did not generate a multi-step plan. The request might be too simple or ambiguous for planning."}]
-
-       step_outputs = {}
-       all_step_results = []
-
-       print(f"Executing plan with {len(plan)} steps...")
-       for step in sorted(plan, key=lambda x: x.get('step_id', 0)):
-           step_id = step.get("step_id")
-           agent_name = step.get("agent_name")
-           task_prompt = step.get("task_prompt", "")
-           dependencies = step.get("dependencies", [])
-           output_var_name = step.get("output_variable_name")
-
-           if not agent_name or not task_prompt:
-               all_step_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": "Invalid step: missing agent_name or task_prompt."})
-               continue
-
-           target_agent = next((a for a in self.agents if a.name == agent_name), None)
-           if not target_agent:
-               all_step_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": f"Agent '{agent_name}' not found for step {step_id}."})
-               continue
-
-           current_task_prompt = task_prompt
-           for dep_id in dependencies:
-               dep_output_key_to_find = None
-               for prev_step in plan:
-                   if prev_step.get("step_id") == dep_id:
-                       dep_output_key_to_find = prev_step.get("output_variable_name", f"step_{dep_id}_output")
-                       break
-
-               if dep_output_key_to_find and dep_output_key_to_find in step_outputs:
-                   current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(step_outputs[dep_output_key_to_find]))
-               else:
-                   print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found for step {step_id}. Prompt may be incomplete.")
-
-           print(f"Executing step {step_id}: Agent='{agent_name}', Prompt='{current_task_prompt[:100]}...'")
-           step_result = await self.execute_agent(target_agent, current_task_prompt)
-           all_step_results.append(step_result)
-
-           if step_result.get("status") == "success":
-               key_to_store = output_var_name if output_var_name else f"step_{step_id}_output"
-               step_outputs[key_to_store] = step_result.get("response")
-
-               if "image_path" in step_result: step_outputs[f"{key_to_store}_image_path"] = step_result["image_path"]
-               if "frame_path" in step_result: step_outputs[f"{key_to_store}_frame_path"] = step_result["frame_path"]
-               if "gif_path" in step_result: step_outputs[f"{key_to_store}_gif_path"] = step_result["gif_path"]
-               if "speech_path" in step_result: step_outputs[f"{key_to_store}_speech_path"] = step_result["speech_path"]
-           else:
-               print(f"Step {step_id} (Agent: {agent_name}) failed. Halting plan execution.")
-               return all_step_results
-
-       print("Master plan execution completed.")
-
-       assistant_response_summary = "Completed plan execution. "
-       if all_step_results and isinstance(all_step_results, list):
-           num_steps = len(all_step_results)
-           successful_steps = sum(1 for res in all_step_results if isinstance(res, dict) and res.get("status") == "success")
-           assistant_response_summary += f"{successful_steps}/{num_steps} steps were successful."
-           last_text_response = next((res.get("response") for res in reversed(all_step_results) if isinstance(res, dict) and res.get("status") == "success" and res.get("response") and isinstance(res.get("response"), str)), None)
-           if last_text_response:
-                assistant_response_summary += f" Last notable output: {last_text_response[:150]}..."
-       else:
-           assistant_response_summary += "No results or an error occurred during planning."
-
-       self.conversation_history.append({"role": "assistant", "content": assistant_response_summary})
-       if len(self.conversation_history) > self.max_history_items:
-           self.conversation_history = self.conversation_history[-self.max_history_items:]
-
-       return all_step_results
 
 class DocumentUniverse:
    def __init__(self):
