@@ -6,10 +6,18 @@ Terminus AI is a comprehensive, locally runnable AI ecosystem designed for power
 *   **Local First:** Designed to run primarily on your local hardware.
 *   **Ollama Integration:** Seamlessly manages Ollama for running various open-source Large Language Models.
 *   **Multiple Pre-configured AI Agents:** Includes specialized agents for tasks like advanced reasoning, code generation, data analysis, web research, and more.
+    *   **ImageForge Agent:** Text-to-image generation using advanced diffusion models.
+    *   **Video Processing Utilities:** Get video info, extract frames, and convert video segments to GIF.
+    *   **AudioMaestro Agent:** Audio file analysis (get info), format conversion, and Text-to-Speech (TTS).
+    *   **Enhanced CodeMaster:** Experimental AI-assisted code modification in projects, code explanation, and generation of new code modules/classes.
+*   **Sophisticated Orchestration Engine:**
+    *   **MasterPlanner Agent (Experimental):** Decomposes complex user requests into multi-step execution plans for other specialized agents.
+    *   **Contextual Agent Selection:** Orchestrator utilizes UI context (current operation mode) and zero-shot intent classification to improve automatic agent routing in Multi-Agent Chat.
+    *   **Conversational Memory:** Basic conversation history is maintained and provided as context to the MasterPlanner for more relevant follow-up actions.
 *   **Extensible Agent Configuration:** Agent capabilities and models can be configured via `agents.json`.
 *   **Model Management:** Model downloads are managed via `models.conf`, allowing selection of specific models.
 *   **Web UI:** Provides an interactive web interface using Streamlit for easy interaction with agents and tools.
-*   **Core Capabilities:** Offers document processing, web intelligence, and code generation utilities.
+*   **Core Capabilities:** Offers document processing, web intelligence, and project scaffolding utilities.
 *   **Version-Pinned Dependencies:** Uses `*_requirements.txt` files with pinned versions for Python packages to ensure stability and reproducibility.
 *   **Automated Setup:** A single bash script automates the installation of dependencies and components.
 
@@ -41,10 +49,14 @@ This will start the Ollama server (if not already running) and the Streamlit Web
 
 ### Basic Usage
 The Web UI provides several operation modes:
-*   **Multi-Agent Chat:** Interact with multiple AI agents simultaneously.
+*   **Multi-Agent Chat:** Interact with multiple AI agents simultaneously. Can optionally use `MasterPlanner` for complex requests and benefits from contextual agent selection and conversational memory.
 *   **Document Processing:** Upload and analyze documents.
 *   **Web Intelligence:** Perform web searches and analyze results.
-*   Other modes for code generation, data analysis, etc., may be available.
+*   **Image Generation:** Create images from text prompts.
+*   **Video Processing:** Utilities for video file information, frame extraction, and GIF conversion.
+*   **Audio Processing:** Tools for audio analysis, format conversion, and Text-to-Speech.
+*   **Code Generation:** Scaffold new projects, modify existing code (experimental), explain code snippets, and generate code modules.
+*   Other modes for data analysis, etc., may be available.
 
 Select agents, adjust parameters like temperature, and input your queries or tasks through the UI.
 
