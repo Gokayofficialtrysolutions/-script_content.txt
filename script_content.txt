@@ -442,6 +442,14 @@ class TerminusOrchestrator:
            print(f"WARNING: Failed to initialize Zero-Shot Intent Classifier: {e}. Intent classification will be unavailable.")
            self.intent_classifier = None
 
+       self.conversation_history = []
+       self.max_history_items = 6 # e.g., 3 user + 3 assistant turns
+
+   def get_conversation_history_for_display(self) -> List[Dict]:
+       # Returns a copy of the conversation history.
+       # Each item is expected to be a dict like {'role': 'user'/'assistant', 'content': '...'}
+       return list(self.conversation_history)
+
    async def scaffold_new_project(self, project_name: str, project_type: str) -> Dict:
        if not project_name or not project_type:
            return {"status": "error", "message": "Project name and type are required."}
@@ -999,6 +1007,10 @@ class TerminusOrchestrator:
    async def execute_master_plan(self, user_prompt: str) -> List[Dict]:
        print(f"MasterPlanner received user prompt: '{user_prompt[:100]}...'")
 
+       self.conversation_history.append({"role": "user", "content": user_prompt})
+       if len(self.conversation_history) > self.max_history_items:
+           self.conversation_history = self.conversation_history[-self.max_history_items:]
+
        # Step 0: Classify intent to aid MasterPlanner
        classified_intent_result = await self.classify_user_intent(user_prompt)
        intent_info_for_planner = "No specific intent pre-classified or low confidence."
@@ -1013,17 +1025,25 @@ class TerminusOrchestrator:
        if not master_planner_agent:
            return [{"status": "error", "agent": "MasterPlanner", "response": "MasterPlanner agent not found or configured."}]
 
-       available_agents_description = "\n".join([
-           f"- {agent.name}: Specializes in '{agent.specialty}'. (Model: {agent.model})"
-           for agent in self.agents if agent.name != "MasterPlanner"
-       ])
+       history_for_prompt_list = []
+       if self.conversation_history: # Check if history is not empty
+           # Exclude the very last item, which is the current user_prompt already being processed
+           history_to_consider = self.conversation_history[:-1]
+           for turn in history_to_consider:
+               history_for_prompt_list.append(f"{turn['role'].capitalize()}: {turn['content']}")
+       history_string_for_prompt = "\n".join(history_for_prompt_list)
+       # Ensure newline only if history exists
+       history_context_for_prompt = f"Recent conversation history (for context, most recent is last):\n{history_string_for_prompt}\n\n" if history_string_for_prompt else ""
+
+       dynamic_agents_description = self.get_agent_capabilities_description() # Call the new helper method
 
        planner_prompt = (
-           f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents. "
-           f"Analyze the following user request: '{user_prompt}'\n\n"
+           f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents.\n\n"
+           f"{history_context_for_prompt}"
+           f"Analyze the following CURRENT user request: '{user_prompt}'\n\n"
            f"{intent_info_for_planner}\n\n"
-           f"Available agents and their specialties are:\n{available_agents_description}\n\n"
-           f"Based on the user request and agent capabilities, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
+           f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
+           f"Based on the user request and ONLY the agents listed above, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
            f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
            f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
            f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
@@ -1115,6 +1135,22 @@ class TerminusOrchestrator:
                return all_step_results
 
        print("Master plan execution completed.")
+
+       assistant_response_summary = "Completed plan execution. "
+       if all_step_results and isinstance(all_step_results, list):
+           num_steps = len(all_step_results)
+           successful_steps = sum(1 for res in all_step_results if isinstance(res, dict) and res.get("status") == "success")
+           assistant_response_summary += f"{successful_steps}/{num_steps} steps were successful."
+           last_text_response = next((res.get("response") for res in reversed(all_step_results) if isinstance(res, dict) and res.get("status") == "success" and res.get("response") and isinstance(res.get("response"), str)), None)
+           if last_text_response:
+                assistant_response_summary += f" Last notable output: {last_text_response[:150]}..."
+       else:
+           assistant_response_summary += "No results or an error occurred during planning."
+
+       self.conversation_history.append({"role": "assistant", "content": assistant_response_summary})
+       if len(self.conversation_history) > self.max_history_items:
+           self.conversation_history = self.conversation_history[-self.max_history_items:]
+
        return all_step_results
 
 class DocumentUniverse:
@@ -1215,10 +1251,13 @@ def main():
 **Step {i+1} Output (Agent: {step_result.get('agent', 'N/A')})**")
                            status_icon = "✅" if step_result.get("status") == "success" else "⚠️" if step_result.get("status") == "info" else "❌"
 
-                           if "response" in step_result:
-                               with st.expander(f"{status_icon} Agent: {step_result.get('agent', 'N/A')} ({step_result.get('model', 'N/A')}) - Step {i+1}", expanded=True):
-                                   st.markdown(step_result["response"])
+                           if "response" in step_result: # Check if 'response' key exists
+                               # Ensure expander is created even if response is None or empty, to show other details
+                               expanded_default = True if step_result.get("response") else False # Expand if there's a text response
+                               with st.expander(f"{status_icon} Agent: {step_result.get('agent', 'N/A')} ({step_result.get('model', 'N/A')}) - Step {i+1}", expanded=expanded_default):
+                                   st.markdown(str(step_result.get("response", ""))) # Convert None to empty string for markdown
 
+                           # Display rich media outputs if available
                            if step_result.get("image_path"):
                                st.image(step_result["image_path"], caption=f"Image from Step {i+1} ({step_result.get('agent')})")
                            if step_result.get("frame_path"):
@@ -1227,11 +1266,12 @@ def main():
                                st.image(step_result["gif_path"], caption=f"GIF from Step {i+1} ({step_result.get('agent')})")
                                st.markdown(f"Path to GIF: `{step_result['gif_path']}`")
                            if step_result.get("speech_path"):
-                               st.audio(step_result["speech_path"], format='audio/mpeg') # Default to mpeg, adjust if needed
+                               st.audio(step_result["speech_path"]) # Auto-detect format
                                st.markdown(f"Path to audio: `{step_result['speech_path']}`")
                            if step_result.get("modified_file"):
                                st.info(f"File modified by {step_result.get('agent')}: {step_result.get('modified_file')}")
 
+                           # Raw JSON for debugging
                            with st.expander(f"Raw JSON for Step {i+1} result", expanded=False):
                                st.json(step_result)
                    else:
@@ -1257,11 +1297,44 @@ def main():
                                # Handle cases where MasterPlanner might have returned an info/error message if not using the planner path
                                if result.get("agent") == "MasterPlanner" and result.get("status") != "success":
                                    st.info(f"MasterPlanner Info: {result.get('response')}")
-                                   continue # Skip normal expander for this
-                               with st.expander(f"{status_icon} {result.get('agent', 'N/A')} ({result.get('model', 'N/A')})"):
-                                   st.write(result.get("response"))
+                                   continue
+                               # Default expander for regular agent responses
+                               expanded_default_regular = True if result.get("response") else False
+                               with st.expander(f"{status_icon} {result.get('agent', 'N/A')} ({result.get('model', 'N/A')})", expanded=expanded_default_regular):
+                                   st.write(str(result.get("response",""))) # Ensure response is a string
                else:
                    st.warning("Please enter a prompt.")
+
+           # Display conversation history after results
+           st.markdown("---")
+           if hasattr(orchestrator, 'get_conversation_history_for_display'):
+               history_to_display = orchestrator.get_conversation_history_for_display()
+               if history_to_display:
+                   with st.expander("📜 Conversation History (Recent Turns)", expanded=False):
+                       for turn in reversed(history_to_display):
+                           role = turn.get('role', 'unknown').capitalize()
+                           content = str(turn.get('content', '')) # Ensure content is string
+
+                           # Create a more unique key using a combination of role, timestamp, and content snippet
+                           timestamp_for_key = int(time.time() * 1000) # milliseconds for more uniqueness
+                           key_content_snippet = "".join(filter(str.isalnum, content[:20])) # alphanumeric snippet
+                           unique_key = f"history_{role.lower()}_{timestamp_for_key}_{key_content_snippet}"
+
+                           if role == "User":
+                               st.markdown(f"**👤 User:**")
+                               st.text_area("", value=content, height=100, disabled=True, key=unique_key)
+                           elif role == "Assistant":
+                               st.markdown(f"**🤖 Assistant (Summary/Response):**") # Clarified role
+                               st.text_area("", value=content, height=100, disabled=True, key=unique_key)
+                           else: # Should not happen with current history structure but good for robustness
+                               st.markdown(f"**{role}:**")
+                               st.text_area("", value=content, height=100, disabled=True, key=unique_key)
+                           st.markdown("---")
+               # else: # This case means no history items, not that method is missing.
+               #    st.caption("No history yet for this session.") # Covered by if history_to_display
+           # else: # This means the method itself is missing.
+           #    st.caption("Conversation history feature not available in orchestrator.")
+
 
        with col2:
            st.subheader("SYSTEM STATUS")

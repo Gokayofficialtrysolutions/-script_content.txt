@@ -57,17 +57,17 @@ ipywidgets==8.1.1
 
 # Added from script-generating functions
 dask==2024.7.1
-distributed==X.Y.Z  # Version lookup failed (PyPI access issue)
+distributed==2024.7.1  # Inferred from dask version
 polars==1.3.0
-pyarrow==X.Y.Z  # Version lookup failed (PyPI access issue)
-fastparquet==X.Y.Z  # Version lookup failed (PyPI access issue)
-h5py==X.Y.Z  # Version lookup failed (PyPI access issue)
-tables==X.Y.Z  # Version lookup failed (PyPI access issue)
-celery==X.Y.Z  # Version lookup failed (PyPI access issue)
-cryptography==X.Y.Z  # Version lookup failed (PyPI access issue)
-keyring==X.Y.Z  # Version lookup failed (PyPI access issue)
-bcrypt==X.Y.Z  # Version lookup failed (PyPI access issue)
-passlib==X.Y.Z  # Version lookup failed (PyPI access issue)
+pyarrow==18.1.0
+fastparquet==2024.11.0
+h5py==3.11.0
+tables==3.10.1
+celery==5.4.0
+cryptography==43.0.0
+keyring==25.2.1
+bcrypt==4.2.0
+passlib==X.Y.Z  # Version lookup failed (PyPI/repo access issue)
 diffusers==0.30.0
 
 # For AudioMaestro Agent (Audio Processing & TTS)

@@ -19,6 +19,6 @@ pinecone-client==2.2.4
 # Added from script-generating functions
 qiskit==1.1.1
 pennylane==0.37.0
-tensorflow-quantum==X.Y.Z  # Version lookup failed (PyPI access issue)
-cirq==X.Y.Z  # Version lookup failed (PyPI access issue)
+tensorflow-quantum==0.7.3
+cirq==1.4.1
 ray==2.32.0
