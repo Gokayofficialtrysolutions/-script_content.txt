@@ -271,6 +271,12 @@ create_agent_orchestration_script() {
     "active": true
   },
   {
+    "name": "MasterPlanner",
+    "model": "mixtral:8x22b",
+    "specialty": "Complex Task Planning and Decomposition into Agent Steps. Output ONLY JSON plans.",
+    "active": true
+  },
+  {
     "name": "CodeMaster",
     "model": "deepseek-coder-v2:16b",
     "specialty": "Programming & Development",
@@ -366,6 +372,7 @@ from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import List,Dict,Any,Optional
 from pathlib import Path
+from transformers import pipeline as hf_pipeline
 from tools.auto_dev import auto_dev # Added for project scaffolding
 # streamlit and pandas are not directly used here but in the UI script that imports this.
 
@@ -416,6 +423,24 @@ class TerminusOrchestrator:
        except Exception as e:
            print(f"WARNING: Failed to initialize TTS engine (pyttsx3): {e}. TTS functionality will be unavailable.")
            self.tts_engine = None
+
+       # Zero-Shot Intent Classifier Setup
+       self.intent_classifier = None
+       self.intent_classifier_model = "facebook/bart-large-mnli"
+       self.candidate_intent_labels = [
+           "image_generation", "code_generation", "code_modification", "code_explanation",
+           "project_scaffolding", "video_info", "video_frame_extraction", "video_to_gif",
+           "audio_info", "audio_format_conversion", "text_to_speech",
+           "data_analysis", "web_search", "document_processing", "general_question_answering",
+           "complex_task_planning"
+       ]
+       try:
+           print(f"Initializing Zero-Shot Intent Classifier ({self.intent_classifier_model})...")
+           self.intent_classifier = hf_pipeline("zero-shot-classification", model=self.intent_classifier_model, device=self.device)
+           print("Intent Classifier initialized.")
+       except Exception as e:
+           print(f"WARNING: Failed to initialize Zero-Shot Intent Classifier: {e}. Intent classification will be unavailable.")
+           self.intent_classifier = None
 
    async def scaffold_new_project(self, project_name: str, project_type: str) -> Dict:
        if not project_name or not project_type:
@@ -951,6 +976,147 @@ class TerminusOrchestrator:
 
        return {"consensus_score":consensus_score,"best_response":best_response,"summary":f"Processed by {len(responses)} of {len(results)} initially tasked agents."}
 
+   async def classify_user_intent(self, user_prompt: str) -> Dict:
+       if not self.intent_classifier:
+           return {"status": "error", "message": "Intent classifier not available.", "intent": None, "scores": None}
+       if not user_prompt.strip():
+           return {"status": "error", "message": "Prompt is empty, cannot classify intent.", "intent": None, "scores": None}
+
+       try:
+           print(f"Classifying intent for prompt: '{user_prompt[:100]}...'")
+           classification_result = self.intent_classifier(user_prompt, self.candidate_intent_labels, multi_label=True)
+
+           top_intent = classification_result['labels'][0]
+           scores_dict = {label: score for label, score in zip(classification_result['labels'], classification_result['scores'])}
+
+           print(f"Top identified intent: {top_intent} (Score: {scores_dict[top_intent]:.4f})")
+           return {"status": "success", "intent": top_intent, "all_scores": scores_dict, "raw_result": classification_result}
+
+       except Exception as e:
+           print(f"ERROR: Intent classification failed: {str(e)}")
+           return {"status": "error", "message": f"Intent classification failed: {str(e)}", "intent": None, "scores": None}
+
+   async def execute_master_plan(self, user_prompt: str) -> List[Dict]:
+       print(f"MasterPlanner received user prompt: '{user_prompt[:100]}...'")
+
+       # Step 0: Classify intent to aid MasterPlanner
+       classified_intent_result = await self.classify_user_intent(user_prompt)
+       intent_info_for_planner = "No specific intent pre-classified or low confidence."
+       if classified_intent_result and classified_intent_result.get("status") == "success":
+           top_intent = classified_intent_result.get("intent")
+           top_score = classified_intent_result.get("all_scores", {}).get(top_intent, 0)
+           if top_score > 0.7: # Confidence threshold
+               intent_info_for_planner = f"Pre-classified user intent: '{top_intent}' (Confidence: {top_score:.2f}). Please consider this primary intent when creating the plan."
+
+       # Step 1: Get the plan from MasterPlanner agent
+       master_planner_agent = next((agent for agent in self.agents if agent.name == "MasterPlanner"), None)
+       if not master_planner_agent:
+           return [{"status": "error", "agent": "MasterPlanner", "response": "MasterPlanner agent not found or configured."}]
+
+       available_agents_description = "\n".join([
+           f"- {agent.name}: Specializes in '{agent.specialty}'. (Model: {agent.model})"
+           for agent in self.agents if agent.name != "MasterPlanner"
+       ])
+
+       planner_prompt = (
+           f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents. "
+           f"Analyze the following user request: '{user_prompt}'\n\n"
+           f"{intent_info_for_planner}\n\n"
+           f"Available agents and their specialties are:\n{available_agents_description}\n\n"
+           f"Based on the user request and agent capabilities, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
+           f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
+           f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
+           f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
+           f"  - 'dependencies': (Optional, List[Integer]) A list of 'step_id's that this step depends on. The outputs of these dependency steps can be referenced in the 'task_prompt' using {{{{output_variable_name_of_dependency_step}}}} syntax if needed. For now, assume sequential execution if dependencies are complex to manage.\n"
+           f"  - 'output_variable_name': (Optional, String) A descriptive variable name (e.g., 'analysis_result', 'generated_image_path') to store the primary output of this step. This can be used by subsequent dependent steps.\n\n"
+           f"Example of a step: {{'step_id': 1, 'agent_name': 'WebCrawler', 'task_prompt': 'Search for recent news about topic X.', 'output_variable_name': 'news_summary'}}\n"
+           f"Example of a dependent step: {{'step_id': 2, 'agent_name': 'CreativeWriter', 'task_prompt': 'Write a blog post based on this summary: {{{{news_summary}}}}', 'dependencies': [1]}}\n\n"
+           f"IMPORTANT: Output ONLY the JSON plan as a raw string. Do not include any other text, explanations, or markdown formatting. The JSON must be a valid list of objects.\n"
+           f"If the user request is simple and can be handled by a single agent directly, create a one-step plan. If the request is ambiguous or cannot be planned, return an empty JSON list []."
+       )
+
+       print("Prompting MasterPlanner...")
+       plan_generation_result = await self.execute_agent(master_planner_agent, planner_prompt)
+
+       if plan_generation_result.get("status") != "success":
+           return [{"status": "error", "agent": "MasterPlanner", "response": f"MasterPlanner failed to generate a plan: {plan_generation_result.get('response')}"}]
+
+       plan_json_str = plan_generation_result.get("response", "").strip()
+       print(f"MasterPlanner returned plan (raw): {plan_json_str[:500]}...")
+
+       if not plan_json_str:
+            return [{"status": "error", "agent": "MasterPlanner", "response": "MasterPlanner returned an empty plan string."}]
+
+       try:
+           plan = json.loads(plan_json_str)
+           if not isinstance(plan, list):
+               if isinstance(plan, dict) and 'plan' in plan and isinstance(plan['plan'], list):
+                   plan = plan['plan']
+               else:
+                   raise ValueError("Plan is not a JSON list.")
+       except json.JSONDecodeError as e:
+           print(f"JSONDecodeError parsing plan: {e}. Raw response: {plan_json_str}")
+           return [{"status": "error", "agent": "MasterPlanner", "response": f"Failed to parse plan from MasterPlanner (JSONDecodeError): {e}. Response: {plan_json_str[:200]}"}]
+       except ValueError as e:
+           print(f"ValueError parsing plan: {e}. Raw response: {plan_json_str}")
+           return [{"status": "error", "agent": "MasterPlanner", "response": f"Plan format error: {e}. Response: {plan_json_str[:200]}"}]
+
+       if not plan:
+           print("MasterPlanner returned an empty plan list, indicating request might be simple or unplannable.")
+           return [{"status": "info", "agent": "MasterPlanner", "response": "MasterPlanner did not generate a multi-step plan. The request might be too simple or ambiguous for planning."}]
+
+       step_outputs = {}
+       all_step_results = []
+
+       print(f"Executing plan with {len(plan)} steps...")
+       for step in sorted(plan, key=lambda x: x.get('step_id', 0)):
+           step_id = step.get("step_id")
+           agent_name = step.get("agent_name")
+           task_prompt = step.get("task_prompt", "")
+           dependencies = step.get("dependencies", [])
+           output_var_name = step.get("output_variable_name")
+
+           if not agent_name or not task_prompt:
+               all_step_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": "Invalid step: missing agent_name or task_prompt."})
+               continue
+
+           target_agent = next((a for a in self.agents if a.name == agent_name), None)
+           if not target_agent:
+               all_step_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": f"Agent '{agent_name}' not found for step {step_id}."})
+               continue
+
+           current_task_prompt = task_prompt
+           for dep_id in dependencies:
+               dep_output_key_to_find = None
+               for prev_step in plan:
+                   if prev_step.get("step_id") == dep_id:
+                       dep_output_key_to_find = prev_step.get("output_variable_name", f"step_{dep_id}_output")
+                       break
+
+               if dep_output_key_to_find and dep_output_key_to_find in step_outputs:
+                   current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(step_outputs[dep_output_key_to_find]))
+               else:
+                   print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found for step {step_id}. Prompt may be incomplete.")
+
+           print(f"Executing step {step_id}: Agent='{agent_name}', Prompt='{current_task_prompt[:100]}...'")
+           step_result = await self.execute_agent(target_agent, current_task_prompt)
+           all_step_results.append(step_result)
+
+           if step_result.get("status") == "success":
+               key_to_store = output_var_name if output_var_name else f"step_{step_id}_output"
+               step_outputs[key_to_store] = step_result.get("response")
+
+               if "image_path" in step_result: step_outputs[f"{key_to_store}_image_path"] = step_result["image_path"]
+               if "frame_path" in step_result: step_outputs[f"{key_to_store}_frame_path"] = step_result["frame_path"]
+               if "gif_path" in step_result: step_outputs[f"{key_to_store}_gif_path"] = step_result["gif_path"]
+               if "speech_path" in step_result: step_outputs[f"{key_to_store}_speech_path"] = step_result["speech_path"]
+           else:
+               print(f"Step {step_id} (Agent: {agent_name}) failed. Halting plan execution.")
+               return all_step_results
+
+       print("Master plan execution completed.")
+       return all_step_results
+
 class DocumentUniverse:
    def __init__(self):
        self.processors={"pdf":self.pdf_proc,"docx":self.docx_proc,"xlsx":self.xlsx_proc,"html":self.html_proc,"json":self.json_proc,"csv":self.csv_proc,"txt":self.txt_proc}
@@ -1034,23 +1200,68 @@ def main():
        with col1:
            st.subheader("UNIVERSAL AI COMMAND")
            user_prompt=st.text_area("Enter your command:",height=200,placeholder="Ask anything - the entire AI constellation will respond...")
+           use_master_planner = st.checkbox("✨ Use MasterPlanner for complex requests (experimental)", key="use_master_planner_checkbox")
 
            if st.button("EXECUTE ALL AGENTS",type="primary"):
-               if user_prompt: # selected_agents can be empty for intent recognition
-                   with st.spinner("Processing across AI constellation..."):
-                       current_context = {"current_mode": operation_mode}
-                       # If selected_agents is empty, orchestrator will use intent recognition
-                       results=asyncio.run(orchestrator.parallel_execution(prompt=user_prompt, selected_agents=selected_agents, context=current_context))
+               if user_prompt:
+                   if use_master_planner:
+                       with st.spinner("MasterPlanner is thinking and coordinating... This may take a while."):
+                           planned_results = asyncio.run(orchestrator.execute_master_plan(user_prompt))
+                       st.subheader("MASTER PLAN EXECUTION RESULTS:")
+                       if not planned_results:
+                           st.info("The MasterPlanner did not generate any steps or the plan execution yielded no results.")
+                       for i, step_result in enumerate(planned_results):
+                           st.markdown(f"---
+**Step {i+1} Output (Agent: {step_result.get('agent', 'N/A')})**")
+                           status_icon = "✅" if step_result.get("status") == "success" else "⚠️" if step_result.get("status") == "info" else "❌"
 
-                       if consensus_mode:
-                           consensus=orchestrator.consensus_analysis(results)
-                           st.success(f"Consensus Score: {consensus['consensus_score']:.2%}")
+                           if "response" in step_result:
+                               with st.expander(f"{status_icon} Agent: {step_result.get('agent', 'N/A')} ({step_result.get('model', 'N/A')}) - Step {i+1}", expanded=True):
+                                   st.markdown(step_result["response"])
 
-                       st.subheader("AGENT RESPONSES")
-                       for result in results:
-                           status_icon="✅" if result["status"]=="success" else "❌"
-                           with st.expander(f"{status_icon} {result['agent']} ({result['model']})"):
-                               st.write(result["response"])
+                           if step_result.get("image_path"):
+                               st.image(step_result["image_path"], caption=f"Image from Step {i+1} ({step_result.get('agent')})")
+                           if step_result.get("frame_path"):
+                               st.image(step_result["frame_path"], caption=f"Video Frame from Step {i+1} ({step_result.get('agent')})")
+                           if step_result.get("gif_path"):
+                               st.image(step_result["gif_path"], caption=f"GIF from Step {i+1} ({step_result.get('agent')})")
+                               st.markdown(f"Path to GIF: `{step_result['gif_path']}`")
+                           if step_result.get("speech_path"):
+                               st.audio(step_result["speech_path"], format='audio/mpeg') # Default to mpeg, adjust if needed
+                               st.markdown(f"Path to audio: `{step_result['speech_path']}`")
+                           if step_result.get("modified_file"):
+                               st.info(f"File modified by {step_result.get('agent')}: {step_result.get('modified_file')}")
+
+                           with st.expander(f"Raw JSON for Step {i+1} result", expanded=False):
+                               st.json(step_result)
+                   else:
+                       with st.spinner("Processing across AI constellation..."):
+                           current_context = {"current_mode": operation_mode}
+                           results=asyncio.run(orchestrator.parallel_execution(prompt=user_prompt, selected_agents=selected_agents, context=current_context))
+
+                           if consensus_mode and results: # ensure results is not empty
+                               # Filter out potential error or info messages from MasterPlanner if it was incorrectly part of results
+                               valid_agent_responses = [r for r in results if r.get("agent") != "MasterPlanner" or r.get("status") == "success"]
+                               if valid_agent_responses:
+                                   consensus = orchestrator.consensus_analysis(valid_agent_responses)
+                                   st.success(f"Consensus Score: {consensus['consensus_score']:.2%}")
+                               else:
+                                   st.info("No valid agent responses for consensus analysis.")
+
+
+                           st.subheader("AGENT RESPONSES")
+                           if not results:
+                               st.info("No results from agents.")
+                           for result in results:
+                               status_icon="✅" if result.get("status")=="success" else "⚠️" if result.get("status") == "info" else "❌"
+                               # Handle cases where MasterPlanner might have returned an info/error message if not using the planner path
+                               if result.get("agent") == "MasterPlanner" and result.get("status") != "success":
+                                   st.info(f"MasterPlanner Info: {result.get('response')}")
+                                   continue # Skip normal expander for this
+                               with st.expander(f"{status_icon} {result.get('agent', 'N/A')} ({result.get('model', 'N/A')})"):
+                                   st.write(result.get("response"))
+               else:
+                   st.warning("Please enter a prompt.")
 
        with col2:
            st.subheader("SYSTEM STATUS")
