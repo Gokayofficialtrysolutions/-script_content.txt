@@ -375,6 +375,8 @@ from pathlib import Path
 from transformers import pipeline as hf_pipeline
 import sys # For platform detection
 import re # For parsing 'top N' processes
+import platform # For OS info
+# subprocess, shutil, asyncio, Path are already effectively imported or used within methods
 from tools.auto_dev import auto_dev # Added for project scaffolding
 # streamlit and pandas are not directly used here but in the UI script that imports this.
 
@@ -945,6 +947,107 @@ class TerminusOrchestrator:
        except Exception as e:
            return {"status": "error", "data": str(e), "message": f"Failed to get top processes: {str(e)}"}
 
+    async def get_os_info(self) -> Dict:
+        try:
+            uname_info = platform.uname()
+            data = {
+                "system": uname_info.system,
+                "node_name": uname_info.node,
+                "release": uname_info.release,
+                "version": uname_info.version,
+                "machine": uname_info.machine,
+                "processor": uname_info.processor,
+                "platform_string": platform.platform()
+            }
+            return {"status": "success", "data": data, "message": "OS information retrieved."}
+        except Exception as e:
+            return {"status": "error", "data": str(e), "message": f"Failed to get OS information: {str(e)}"}
+
+    async def get_cpu_info(self) -> Dict:
+        os_type = sys.platform
+        command = []
+        data = {}
+
+        try:
+            if os_type == "linux" or os_type == "linux2":
+                if shutil.which("lscpu"):
+                    command = ["lscpu"]
+                    process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout, stderr = await process.communicate()
+                    if process.returncode == 0:
+                        # Basic parsing for lscpu - more detailed parsing could be added
+                        raw_data = stdout.decode()
+                        data_lines = [line.split(":", 1) for line in raw_data.splitlines() if ":" in line]
+                        data = {item[0].strip(): item[1].strip() for item in data_lines if len(item) == 2}
+                        return {"status": "success", "data": data, "message": "CPU information retrieved using lscpu."}
+                    else:
+                        return {"status": "error", "data": stderr.decode(), "message": f"lscpu command failed: {stderr.decode()}"}
+                elif Path("/proc/cpuinfo").is_file(): # Fallback for Linux
+                    cpu_info_raw = Path("/proc/cpuinfo").read_text()
+                    # Basic parsing of /proc/cpuinfo
+                    data = {}
+                    for line in cpu_info_raw.splitlines():
+                        if ":" in line:
+                            key, value = line.split(":", 1)
+                            data[key.strip()] = value.strip()
+                    return {"status": "success", "data": data, "message": "CPU information retrieved from /proc/cpuinfo."}
+                else:
+                    return {"status": "error", "data": "No suitable command/file for CPU info on Linux.", "message": "No suitable command/file for CPU info on Linux."}
+
+            elif os_type == "darwin": # macOS
+                if shutil.which("sysctl"):
+                    command_brand = ["sysctl", "-n", "machdep.cpu.brand_string"]
+                    command_cores = ["sysctl", "-n", "hw.physicalcpu"]
+                    command_logical_cores = ["sysctl", "-n", "hw.logicalcpu"]
+
+                    process_brand = await asyncio.create_subprocess_exec(*command_brand, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout_brand, _ = await process_brand.communicate()
+                    if process_brand.returncode == 0: data["brand_string"] = stdout_brand.decode().strip()
+
+                    process_cores = await asyncio.create_subprocess_exec(*command_cores, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout_cores, _ = await process_cores.communicate()
+                    if process_cores.returncode == 0: data["physical_cores"] = stdout_cores.decode().strip()
+
+                    process_logical = await asyncio.create_subprocess_exec(*command_logical_cores, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout_logical, _ = await process_logical.communicate()
+                    if process_logical.returncode == 0: data["logical_cores"] = stdout_logical.decode().strip()
+
+                    return {"status": "success", "data": data, "message": "CPU information retrieved using sysctl."}
+                else:
+                    return {"status": "error", "data": "Command 'sysctl' not found on macOS.", "message": "Command 'sysctl' not found on macOS."}
+            else:
+                return {"status": "error", "data": f"CPU info command not supported on this OS: {os_type}", "message": f"CPU info command not supported on this OS: {os_type}"}
+        except Exception as e:
+            return {"status": "error", "data": str(e), "message": f"Failed to get CPU info: {str(e)}"}
+
+    async def get_network_config(self) -> Dict:
+        os_type = sys.platform
+        command = []
+        if os_type == "linux" or os_type == "linux2":
+            if shutil.which("ip"):
+                command = ["ip", "addr"]
+            elif shutil.which("ifconfig"): # Fallback for older Linux
+                command = ["ifconfig"]
+            else:
+                return {"status": "error", "data": "Commands 'ip' or 'ifconfig' not found on Linux.", "message": "Commands 'ip' or 'ifconfig' not found on Linux."}
+        elif os_type == "darwin": # macOS
+            if shutil.which("ifconfig"):
+                command = ["ifconfig"]
+            else:
+                return {"status": "error", "data": "Command 'ifconfig' not found on macOS.", "message": "Command 'ifconfig' not found on macOS."}
+        else:
+            return {"status": "error", "data": f"Network config command not supported on this OS: {os_type}", "message": f"Network config command not supported on this OS: {os_type}"}
+
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await process.communicate()
+            if process.returncode == 0:
+                return {"status": "success", "data": stdout.decode(), "message": "Network configuration retrieved."}
+            else:
+                return {"status": "error", "data": stderr.decode(), "message": f"Error getting network config: {stderr.decode()}"}
+        except Exception as e:
+            return {"status": "error", "data": str(e), "message": f"Failed to get network config: {str(e)}"}
+
    async def execute_agent(self, agent: Agent, prompt: str, context: Dict = None) -> Dict:
        if agent.name == "ImageForge": # Or use agent.specialty == "Image Generation"
            return await self.generate_image_with_diffusion(prompt)
@@ -962,15 +1065,21 @@ class TerminusOrchestrator:
                        num_processes = int(match.group(1))
                except Exception:
                    pass
-               return await self.get_top_processes(n=num_processes)
-           else:
-               return {
-                   "status": "info",
-                   "agent": "SystemAdmin",
-                   "response": f"SystemAdmin received: '{prompt}'. Command not recognized for direct execution. Supported commands: 'disk space', 'memory usage', 'top N processes'. For other queries, ensure SystemAdmin uses an LLM."
-               }
-       else:
-           try:
+               return await self.get_top_processes(n=num_processes) # Existing method
+        elif "cpu info" in prompt_lower or "processor details" in prompt_lower:
+            return await self.get_cpu_info()
+        elif "os info" in prompt_lower or "operating system details" in prompt_lower:
+            return await self.get_os_info()
+        elif "network config" in prompt_lower or "ip address" in prompt_lower or "network interfaces" in prompt_lower:
+            return await self.get_network_config()
+        else:
+            return {
+                "status": "info",
+                "agent": "SystemAdmin",
+                "response": f"SystemAdmin received: '{prompt}'. Command not recognized for direct execution. Supported commands: 'disk space', 'memory usage', 'top N processes', 'cpu info', 'os info', 'network config'."
+            }
+    else:
+        try:
                payload = {"model": agent.model, "prompt": f"[{agent.specialty}] {prompt}", "stream": False, "options": {"temperature": 0.7}}
                if context:
                    payload["prompt"] += f"\nContext: {json.dumps(context)}"
@@ -1453,8 +1562,7 @@ def main():
        st.subheader("Parameters")
        temperature=st.slider("Temperature",0.0,2.0,0.7)
        max_tokens=st.slider("Max Tokens",500,8000,2000)
-       parallel_mode=st.checkbox("Parallel Execution",True)
-       consensus_mode=st.checkbox("Consensus Analysis",True)
+       # parallel_mode and consensus_mode are specific to Multi-Agent Chat, moved there or implicitly handled.
 
    # Main Interface
    if operation_mode=="Multi-Agent Chat":
@@ -1572,6 +1680,17 @@ def main():
            st.subheader("AGENT STATUS")
            agent_df=pd.DataFrame([{"Agent":a.name,"Model":a.model,"Status":"Active" if a.active else "Inactive"} for a in orchestrator.agents])
            st.dataframe(agent_df,use_container_width=True)
+
+       # System Information moved to its own operation_mode block below
+       # st.subheader("System Information")
+       # if st.button("Get Disk Space", key="sysinfo_disk_space"):
+       # ... existing code ...
+       # if st.button("Get Memory Usage", key="sysinfo_mem_usage"):
+       # ... existing code ...
+       # top_n_processes = st.number_input("Number of processes:", min_value=1, max_value=50, value=10, key="sysinfo_top_n")
+       # if st.button("Get Top Processes", key="sysinfo_top_procs"):
+       # ... existing code ...
+
 
    elif operation_mode=="Document Processing":
        st.subheader("UNIVERSAL DOCUMENT PROCESSOR")
@@ -1876,6 +1995,96 @@ def main():
                            st.error(result.get("message", "Failed to generate speech."))
                else:
                    st.warning("Please enter text and a filename stem.")
+
+   elif operation_mode == "System Information": # New dedicated mode
+        st.subheader("📊 SYSTEM INFORMATION DASHBOARD")
+        system_admin_agent_name = "SystemAdmin" # Standardized agent name
+
+        # Row 1 for OS and CPU
+        col_os, col_cpu = st.columns(2)
+        with col_os:
+            if st.button("Get OS Details", key="sysinfo_os_details_v2"):
+                with st.spinner("Fetching OS details..."):
+                    result_list = asyncio.run(orchestrator.parallel_execution(
+                        prompt="os info",
+                        selected_agents=[system_admin_agent_name]
+                    ))
+                    if result_list and result_list[0].get("status") == "success":
+                        st.success("OS Details Retrieved:")
+                        st.json(result_list[0].get("data", {"error": "No data"}))
+                    else:
+                        st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
+
+        with col_cpu:
+            if st.button("Get CPU Details", key="sysinfo_cpu_details_v2"):
+                with st.spinner("Fetching CPU details..."):
+                    result_list = asyncio.run(orchestrator.parallel_execution(
+                        prompt="cpu info",
+                        selected_agents=[system_admin_agent_name]
+                    ))
+                    if result_list and result_list[0].get("status") == "success":
+                        st.success("CPU Details Retrieved:")
+                        st.json(result_list[0].get("data", {"error": "No data"}))
+                    else:
+                        st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
+
+        st.markdown("---")
+
+        # Row 2 for Disk and Memory
+        col_disk, col_mem = st.columns(2)
+        with col_disk:
+            if st.button("Get Disk Space", key="sysinfo_disk_space_v3"):
+                with st.spinner("Fetching disk space..."):
+                    result_list = asyncio.run(orchestrator.parallel_execution(
+                        prompt="show disk space",
+                        selected_agents=[system_admin_agent_name]
+                    ))
+                    if result_list and result_list[0].get("status") == "success":
+                        st.text_area("Disk Space:", value=result_list[0].get("data", "No data"), height=250, disabled=True, key="disk_space_output_v3")
+                    else:
+                        st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
+
+        with col_mem:
+            if st.button("Get Memory Usage", key="sysinfo_mem_usage_v3"):
+                with st.spinner("Fetching memory usage..."):
+                    result_list = asyncio.run(orchestrator.parallel_execution(
+                        prompt="show memory usage",
+                        selected_agents=[system_admin_agent_name]
+                    ))
+                    if result_list and result_list[0].get("status") == "success":
+                        st.text_area("Memory Usage:", value=result_list[0].get("data", "No data"), height=250, disabled=True, key="memory_usage_output_v3")
+                    else:
+                        st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
+
+        st.markdown("---")
+
+        # Row 3 for Network and Processes
+        col_net, col_proc = st.columns(2)
+        with col_net:
+            if st.button("Get Network Configuration", key="sysinfo_net_config_v2"):
+                with st.spinner("Fetching network configuration..."):
+                    result_list = asyncio.run(orchestrator.parallel_execution(
+                        prompt="network config",
+                        selected_agents=[system_admin_agent_name]
+                    ))
+                    if result_list and result_list[0].get("status") == "success":
+                        st.success("Network Configuration Retrieved:")
+                        st.text_area("Network Config:", value=result_list[0].get("data", "No data"), height=300, disabled=True, key="net_config_output_v2")
+                    else:
+                        st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
+
+        with col_proc:
+            top_n_processes = st.number_input("Number of processes for 'Top Processes':", min_value=1, max_value=50, value=10, key="sysinfo_top_n_v3")
+            if st.button("Get Top Processes", key="sysinfo_top_procs_v3"):
+                with st.spinner(f"Fetching top {top_n_processes} processes..."):
+                    result_list = asyncio.run(orchestrator.parallel_execution(
+                        prompt=f"show top {top_n_processes} processes",
+                        selected_agents=[system_admin_agent_name]
+                    ))
+                    if result_list and result_list[0].get("status") == "success":
+                        st.text_area(f"Top {top_n_processes} Processes:", value=result_list[0].get("data", "No data"), height=300, disabled=True, key="top_processes_output_v3")
+                    else:
+                        st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
 
 if __name__=="__main__":
    main()
