@@ -1011,39 +1011,259 @@ class TerminusOrchestrator:
        if len(self.conversation_history) > self.max_history_items:
            self.conversation_history = self.conversation_history[-self.max_history_items:]
 
-       # Step 0: Classify intent to aid MasterPlanner
-       classified_intent_result = await self.classify_user_intent(user_prompt)
-       intent_info_for_planner = "No specific intent pre-classified or low confidence."
-       if classified_intent_result and classified_intent_result.get("status") == "success":
-           top_intent = classified_intent_result.get("intent")
-           top_score = classified_intent_result.get("all_scores", {}).get(top_intent, 0)
-           if top_score > 0.7: # Confidence threshold
-               intent_info_for_planner = f"Pre-classified user intent: '{top_intent}' (Confidence: {top_score:.2f}). Please consider this primary intent when creating the plan."
+       max_revision_attempts = 1
+       current_attempt = 0
+       original_plan_json_str = ""
+       final_execution_results = []
+       # Store classified intent from the first attempt to reuse in revisions
+       first_attempt_intent_info = "No specific intent pre-classified or low confidence."
 
-       # Step 1: Get the plan from MasterPlanner agent
-       master_planner_agent = next((agent for agent in self.agents if agent.name == "MasterPlanner"), None)
-       if not master_planner_agent:
-           return [{"status": "error", "agent": "MasterPlanner", "response": "MasterPlanner agent not found or configured."}]
+       while current_attempt <= max_revision_attempts:
+           current_attempt += 1
+           print(f"MasterPlanner Attempt: {current_attempt}/{max_revision_attempts + 1}")
 
-       history_for_prompt_list = []
-       if self.conversation_history: # Check if history is not empty
-           # Exclude the very last item, which is the current user_prompt already being processed
-           history_to_consider = self.conversation_history[:-1]
-           for turn in history_to_consider:
-               history_for_prompt_list.append(f"{turn['role'].capitalize()}: {turn['content']}")
-       history_string_for_prompt = "\n".join(history_for_prompt_list)
-       # Ensure newline only if history exists
-       history_context_for_prompt = f"Recent conversation history (for context, most recent is last):\n{history_string_for_prompt}\n\n" if history_string_for_prompt else ""
+           current_planner_prompt = ""
+           dynamic_agents_description = self.get_agent_capabilities_description()
 
-       dynamic_agents_description = self.get_agent_capabilities_description() # Call the new helper method
+           if current_attempt == 1:
+               classified_intent_result = await self.classify_user_intent(user_prompt)
+               if classified_intent_result and classified_intent_result.get("status") == "success":
+                   top_intent = classified_intent_result.get("intent")
+                   top_score = classified_intent_result.get("all_scores", {}).get(top_intent, 0)
+                   if top_score > 0.7: # Confidence threshold
+                       first_attempt_intent_info = f"Pre-classified user intent: '{top_intent}' (Confidence: {top_score:.2f}). Please consider this primary intent."
 
-       planner_prompt = (
-           f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents.\n\n"
-           f"{history_context_for_prompt}"
-           f"Analyze the following CURRENT user request: '{user_prompt}'\n\n"
-           f"{intent_info_for_planner}\n\n"
-           f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
-           f"Based on the user request and ONLY the agents listed above, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
+               # Keyword-based history selection for the first attempt's prompt
+               current_prompt_lower = user_prompt.lower()
+               stopwords = set(["a", "an", "the", "is", "are", "was", "were", "to", "of", "for", "on", "in", "and", "what", "who", "how", "why", "tell", "me", "about"])
+               current_keywords = {word for word in current_prompt_lower.split() if word.isalnum() and word not in stopwords and len(word) > 2}
+
+               history_to_consider = self.conversation_history[:-1] # Exclude current prompt
+               scored_history = []
+               relevant_history_turns = []
+
+               if current_keywords and history_to_consider: # Only score if there are keywords and history
+                   for i, turn in enumerate(history_to_consider):
+                       turn_content_lower = str(turn.get('content', '')).lower()
+                       score = sum(1 for keyword in current_keywords if keyword in turn_content_lower)
+                       if score > 0: # Only consider turns with some relevance
+                           scored_history.append({"turn": turn, "score": score, "original_index": i})
+
+                   # Sort by score (descending), then by original_index (descending, for recency among same scores)
+                   scored_history.sort(key=lambda x: (x["score"], x["original_index"]), reverse=True)
+
+                   # Select top N relevant turns (e.g., top 2)
+                   relevant_history_turns = [item["turn"] for item in scored_history[:2]] # Take top 2 relevant
+
+               # If no relevant turns found by keywords (or no keywords/history), take the last 1-2 turns as fallback
+               if not relevant_history_turns and history_to_consider:
+                   relevant_history_turns = history_to_consider[-2:] # Last two turns or fewer if not enough history
+
+               history_for_prompt_list = []
+               for turn in relevant_history_turns: # Format the selected relevant turns
+                   history_for_prompt_list.append(f"{turn['role'].capitalize()}: {str(turn.get('content', ''))}")
+               history_string_for_prompt = "\n".join(history_for_prompt_list)
+               history_context_for_prompt = f"Recent relevant conversation history (for context, most recent of selected is last):\n{history_string_for_prompt}\n\n" if history_string_for_prompt else ""
+
+               current_planner_prompt = (
+                   f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents.\n\n"
+                   f"{history_context_for_prompt}" # Use keyword-selected history
+                   f"Analyze the following CURRENT user request: '{user_prompt}'\n\n"
+                   f"{first_attempt_intent_info}\n\n"
+                   f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
+                   f"Based on the user request and ONLY the agents listed above, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
+                   # ... (rest of JSON structure definition as before)
+                   f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
+                   f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
+                   f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
+                   f"  - 'dependencies': (Optional, List[Integer]) A list of 'step_id's that this step depends on. The outputs of these dependency steps can be referenced in the 'task_prompt' using {{{{output_variable_name_of_dependency_step}}}} syntax if needed. For now, assume sequential execution if dependencies are complex to manage.\n"
+                   f"  - 'output_variable_name': (Optional, String) A descriptive variable name (e.g., 'analysis_result', 'generated_image_path') to store the primary output of this step. This can be used by subsequent dependent steps.\n\n"
+                   f"Example of a step: {{'step_id': 1, 'agent_name': 'WebCrawler', 'task_prompt': 'Search for recent news about topic X.', 'output_variable_name': 'news_summary'}}\n"
+                   f"Example of a dependent step: {{'step_id': 2, 'agent_name': 'CreativeWriter', 'task_prompt': 'Write a blog post based on this summary: {{{{news_summary}}}}', 'dependencies': [1]}}\n\n"
+                   f"IMPORTANT: Output ONLY the JSON plan as a raw string. Do not include any other text, explanations, or markdown formatting. The JSON must be a valid list of objects.\n"
+                   f"If the user request is simple and can be handled by a single agent directly, create a one-step plan. If the request is ambiguous or cannot be planned, return an empty JSON list []."
+               )
+           else: # Revision attempt
+               if not original_plan_json_str:
+                   final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": "Cannot revise plan: original plan not found."}]
+                   break
+
+               failed_step_details_json = json.dumps(final_execution_results[-1]) if final_execution_results and final_execution_results[-1].get("status") == "error" else json.dumps({"error": "Unknown failure or no error details from previous plan attempt."})
+
+               # Construct history string again (could be refactored)
+               history_for_prompt_list = []
+               if self.conversation_history:
+                   history_to_consider = self.conversation_history[:-1]
+                   for turn in history_to_consider: # Using all available history for revision prompt
+                       history_for_prompt_list.append(f"{turn['role'].capitalize()}: {turn['content']}")
+               history_string_for_prompt = "\n".join(history_for_prompt_list)
+               history_context_for_prompt = f"Full conversation history (for context, most recent is last):\n{history_string_for_prompt}\n\n" if history_string_for_prompt else ""
+
+               current_planner_prompt = (
+                   f"You are the MasterPlanner. Your previous attempt to create a plan for the user request resulted in an error or an unexecutable plan. Review the original plan, the user's request, the failed step details, and provide a revised JSON plan.
+"
+                   f"{history_context_for_prompt}"
+                   f"Original User Request: '{user_prompt}'\n\n"
+                   f"{first_attempt_intent_info}\n\n" # Use intent from first attempt
+                   f"Original Plan (that failed or was problematic):\n{original_plan_json_str}\n\n"
+                   f"Details of the failed step from the last execution attempt:\n{failed_step_details_json}\n\n"
+                   f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
+                   f"Based on all this information, provide a revised JSON plan. Ensure the new plan addresses the previous failure. "
+                   f"Use the same JSON structure as before (list of steps with 'step_id', 'agent_name', 'task_prompt', 'dependencies', 'output_variable_name').
+"
+                   f"IMPORTANT: Output ONLY the revised JSON plan as a raw string. Do not include any other text. If you determine the original plan cannot be improved or the task is unplannable with the given information and agents, return an empty JSON list []."
+               )
+
+           master_planner_agent = next((agent for agent in self.agents if agent.name == "MasterPlanner"), None)
+           if not master_planner_agent:
+               final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": "MasterPlanner agent not found or configured."}]
+               break
+
+           print(f"Prompting MasterPlanner (Attempt {current_attempt})...")
+           plan_generation_result = await self.execute_agent(master_planner_agent, current_planner_prompt)
+
+           if plan_generation_result.get("status") != "success":
+               final_execution_results = [plan_generation_result] # Store this attempt's error
+               break # If planner fails, no more revisions
+
+           current_plan_json_str = plan_generation_result.get("response", "").strip()
+           if current_attempt == 1:
+               original_plan_json_str = current_plan_json_str # Store the first plan
+
+           if not current_plan_json_str:
+               final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": f"MasterPlanner returned empty plan string on attempt {current_attempt}"}]
+               if current_attempt >= max_revision_attempts: break
+               else: continue # Try revision if allowed
+
+           try:
+               plan_list = json.loads(current_plan_json_str)
+               if not isinstance(plan_list, list):
+                   if isinstance(plan_list, dict) and 'plan' in plan_list and isinstance(plan_list['plan'], list):
+                       plan_list = plan_list['plan']
+                   else:
+                       raise ValueError("Plan is not a JSON list.")
+           except json.JSONDecodeError as e:
+               print(f"JSONDecodeError parsing plan on attempt {current_attempt}: {e}. Raw response: {current_plan_json_str}")
+               final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": f"Failed to parse plan (JSONDecodeError) on attempt {current_attempt}: {e}. Response: {current_plan_json_str[:200]}"}]
+               if current_attempt >= max_revision_attempts: break
+               else: continue # Try revision
+           except ValueError as e:
+               print(f"ValueError parsing plan on attempt {current_attempt}: {e}. Raw response: {current_plan_json_str}")
+               final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": f"Plan format error on attempt {current_attempt}: {e}. Response: {current_plan_json_str[:200]}"}]
+               if current_attempt >= max_revision_attempts: break
+               else: continue # Try revision
+
+           if not plan_list:
+               print(f"MasterPlanner returned an empty plan list on attempt {current_attempt}.")
+               # If it's the first attempt, it's info. If it's a revision that results in empty, it might mean it gave up.
+               final_execution_results = [{"status": "info", "agent": "MasterPlanner", "response": "MasterPlanner returned an empty plan list (may indicate task is unplannable or too simple for multi-step)."}] if current_attempt == 1 else final_execution_results
+               break
+
+           step_outputs = {}
+           current_attempt_results = []
+           plan_succeeded_this_attempt = True
+           print(f"Executing plan with {len(plan_list)} steps (Attempt {current_attempt})...")
+
+           for step in sorted(plan_list, key=lambda x: x.get('step_id', 0)):
+               step_id = step.get("step_id")
+               agent_name = step.get("agent_name")
+               task_prompt = step.get("task_prompt", "")
+               dependencies = step.get("dependencies", [])
+               output_var_name = step.get("output_variable_name")
+
+               if not agent_name or not task_prompt:
+                   current_attempt_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": "Invalid step: missing agent_name or task_prompt."})
+                   plan_succeeded_this_attempt = False; break
+
+               target_agent = next((a for a in self.agents if a.name == agent_name), None)
+               if not target_agent:
+                   current_attempt_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": f"Agent '{agent_name}' not found for step {step_id}."})
+                   plan_succeeded_this_attempt = False; break
+
+               current_task_prompt = task_prompt
+               for dep_id in dependencies:
+                   dep_output_key_to_find = None
+                   # Find the original step definition to get its output_variable_name
+                   for prev_step_def in plan_list:
+                       if prev_step_def.get("step_id") == dep_id:
+                           dep_output_key_to_find = prev_step_def.get("output_variable_name", f"step_{dep_id}_output")
+                           break
+
+                   if dep_output_key_to_find and dep_output_key_to_find in step_outputs:
+                       current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(step_outputs[dep_output_key_to_find]))
+                   else:
+                       print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found for step {step_id}. Prompt may be incomplete.")
+
+               print(f"Executing step {step_id}: Agent='{agent_name}', Prompt='{current_task_prompt[:100]}...'")
+               step_result = await self.execute_agent(target_agent, current_task_prompt)
+               current_attempt_results.append(step_result)
+
+               if step_result.get("status") == "success":
+                   key_to_store = output_var_name if output_var_name else f"step_{step_id}_output"
+                   step_outputs[key_to_store] = step_result.get("response")
+
+                   if "image_path" in step_result: step_outputs[f"{key_to_store}_image_path"] = step_result["image_path"]
+                   if "frame_path" in step_result: step_outputs[f"{key_to_store}_frame_path"] = step_result["frame_path"]
+                   if "gif_path" in step_result: step_outputs[f"{key_to_store}_gif_path"] = step_result["gif_path"]
+                   if "speech_path" in step_result: step_outputs[f"{key_to_store}_speech_path"] = step_result["speech_path"]
+               else:
+                   print(f"Step {step_id} (Agent: {agent_name}) failed. Plan attempt {current_attempt} halted.")
+                   plan_succeeded_this_attempt = False; break
+
+           final_execution_results = current_attempt_results
+           if plan_succeeded_this_attempt:
+               print(f"Plan attempt {current_attempt} succeeded.")
+               break # Exit while loop
+
+       # Summarization and history update for the assistant's response
+       summarizer_agent = next((agent for agent in self.agents if agent.name == "CreativeWriter"), None)
+       if not summarizer_agent: summarizer_agent = next((agent for agent in self.agents if agent.name == "DeepThink"), None)
+
+       if summarizer_agent:
+           plan_execution_summary_for_llm = f"Original User Request: '{user_prompt}'\nPlan Execution Summary (Attempt {current_attempt}):\n"
+           if final_execution_results and isinstance(final_execution_results, list):
+               for i, res in enumerate(final_execution_results):
+                   agent_name = res.get('agent', 'N/A')
+                   status = res.get('status', 'unknown')
+                   response_snippet = str(res.get('response', 'No response'))[:100]
+                   plan_execution_summary_for_llm += f"  Step {i+1} (Agent: {agent_name}): Status='{status}', Output Snippet='{response_snippet}'\n"
+               if not final_execution_results:
+                    plan_execution_summary_for_llm += "  No steps were executed or the plan was empty.\n"
+           else: # Should be a list, but if it's an error dict from planner directly
+                master_planner_error_response = final_execution_results[0].get("response") if isinstance(final_execution_results, list) and final_execution_results and isinstance(final_execution_results[0], dict) else "MasterPlanner did not produce a valid plan or an error occurred."
+                plan_execution_summary_for_llm += f"  MasterPlanner phase outcome: {master_planner_error_response}\n"
+
+           summarizer_prompt = (
+               f"You are an AI assistant. Based on the user's original request and a summary of the multi-step plan execution that followed, "
+               f"provide a concise, natural language summary of what actions were taken by the system and the overall outcome. "
+               f"Focus on what would be most useful for the user to understand what just happened. "
+               f"Do not refer to yourself as '{summarizer_agent.name}', just act as the main AI assistant.\n\n"
+               f"{plan_execution_summary_for_llm}\n\n"
+               f"Please provide only the summary text, suitable for conversation history."
+           )
+           print(f"Requesting summary from {summarizer_agent.name} for plan execution...")
+           summary_result = await self.execute_agent(summarizer_agent, summarizer_prompt)
+
+           if summary_result.get("status") == "success" and summary_result.get("response", "").strip():
+               assistant_response_summary = summary_result.get("response").strip()
+               print(f"LLM Summary for history: {assistant_response_summary}")
+           else:
+               print(f"LLM summarization failed or returned empty. Using static summary. Error: {summary_result.get('response')}")
+               num_steps = len(final_execution_results) if isinstance(final_execution_results, list) else 0
+               successful_steps = sum(1 for res in final_execution_results if isinstance(res, dict) and res.get("status") == "success") if isinstance(final_execution_results, list) else 0
+               assistant_response_summary = f"Plan executed: {successful_steps}/{num_steps} steps successful."
+       else:
+           num_steps = len(final_execution_results) if isinstance(final_execution_results, list) else 0
+           successful_steps = sum(1 for res in final_execution_results if isinstance(res, dict) and res.get("status") == "success") if isinstance(final_execution_results, list) else 0
+           assistant_response_summary = f"Plan executed: {successful_steps}/{num_steps} steps successful (Summarizer agent unavailable)."
+
+       self.conversation_history.append({"role": "assistant", "content": assistant_response_summary})
+       if len(self.conversation_history) > self.max_history_items:
+           self.conversation_history = self.conversation_history[-self.max_history_items:]
+
+       return final_execution_results
+
+class DocumentUniverse:
            f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
            f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
            f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
@@ -1203,7 +1423,7 @@ EOF
 create_terminus_ui_script() {
     progress "CREATING TERMINUS UI SCRIPT"
     cat>"$INSTALL_DIR/terminus_ui.py"<<'EOF'
-import streamlit as st,asyncio,json,time,os,subprocess
+import streamlit as st,asyncio,json,os,subprocess,time # Ensure time is imported
 from pathlib import Path # Path is used for temp_video_path
 import pandas as pd,plotly.express as px,plotly.graph_objects as go
 from agents.master_orchestrator import orchestrator,doc_processor,web_intel
