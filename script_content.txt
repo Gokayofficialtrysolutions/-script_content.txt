@@ -1301,12 +1301,16 @@ class TerminusOrchestrator:
                    f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
                    f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
                    f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
-                   f"  - 'dependencies': (Optional, List[Integer]) A list of 'step_id's that this step depends on. The outputs of these dependency steps can be referenced in the 'task_prompt' using {{{{output_variable_name_of_dependency_step}}}} syntax if needed. For now, assume sequential execution if dependencies are complex to manage.\n"
-                   f"  - 'output_variable_name': (Optional, String) A descriptive variable name (e.g., 'analysis_result', 'generated_image_path') to store the primary output of this step. This can be used by subsequent dependent steps.\n\n"
-                   f"Example of a step: {{'step_id': 1, 'agent_name': 'WebCrawler', 'task_prompt': 'Search for recent news about topic X.', 'output_variable_name': 'news_summary'}}\n"
-                   f"Example of a dependent step: {{'step_id': 2, 'agent_name': 'CreativeWriter', 'task_prompt': 'Write a blog post based on this summary: {{{{news_summary}}}}', 'dependencies': [1]}}\n\n"
+                   f"  - 'dependencies': (Optional, List[Integer]) A list of 'step_id's that this step depends on. The outputs of these dependency steps can be referenced in the 'task_prompt' using {{{{output_variable_name_of_dependency_step}}}} syntax if needed.\n"
+                   f"  - 'output_variable_name': (Optional, String) A descriptive variable name (e.g., 'analysis_result', 'generated_image_path') to store the primary output of this step. This can be used by subsequent dependent steps.\n"
+                   f"  - 'max_retries': (Integer, Optional, Default: 0) Maximum number of times to retry this step if it fails. Use for tasks like network requests that might have transient failures.\n"
+                   f"  - 'retry_delay_seconds': (Integer, Optional, Default: 5) Seconds to wait before retrying this step.\n"
+                   f"  - 'retry_on_statuses': (List[String], Optional, Default: [\"error\"]) List of failure statuses (e.g., \"error\", \"timeout\") that should trigger a retry for this step.\n\n"
+                   f"Example of a simple step: {{'step_id': 1, 'agent_name': 'WebCrawler', 'task_prompt': 'Search for recent news about topic X.', 'output_variable_name': 'news_summary'}}\n"
+                   f"Example of a dependent step: {{'step_id': 2, 'agent_name': 'CreativeWriter', 'task_prompt': 'Write a blog post based on this summary: {{{{news_summary}}}}', 'dependencies': [1]}}\n"
+                   f"Example of a step with retry logic: {{'step_id': 3, 'agent_name': 'WebCrawler', 'task_prompt': 'Fetch data from http://unreliable-api.com/data', 'output_variable_name': 'api_data', 'max_retries': 2, 'retry_delay_seconds': 10, 'retry_on_statuses': ['error', 'timeout']}}\n\n"
                    f"IMPORTANT: Output ONLY the JSON plan as a raw string. Do not include any other text, explanations, or markdown formatting. The JSON must be a valid list of objects.\n"
-                   f"If the user request is simple and can be handled by a single agent directly, create a one-step plan. If the request is ambiguous or cannot be planned, return an empty JSON list []."
+                   f"If the user request is simple and can be handled by a single agent directly, create a one-step plan. If the request is ambiguous or cannot be planned, return an empty JSON list []. Use retry parameters judiciously for steps prone to transient issues."
                )
            else: # Revision attempt
                if not original_plan_json_str:
@@ -1409,50 +1413,81 @@ class TerminusOrchestrator:
                if current_attempt >= max_revision_attempts: break # Break while loop if validation fails on last attempt
                else: continue # Try revision if validation fails and more attempts are allowed
 
-           # Proceed with execution if plan is valid
-           for step in sorted(plan_list, key=lambda x: x.get('step_id', 0)): # Sorting already handles missing step_id for sorting key
-               step_id = step.get("step_id") # Already validated to exist and be int
-               agent_name = step.get("agent_name") # Already validated
-               task_prompt = step.get("task_prompt", "") # Already validated
-               dependencies = step.get("dependencies", []) # Optional
-               output_var_name = step.get("output_variable_name") # Optional
+           # Enhanced Plan Step Schema (for documentation purposes within the code):
+           # Each step in the 'plan_list' is a dictionary. Beyond the validated keys
+           # ('step_id', 'agent_name', 'task_prompt'), it can optionally include:
+           #   - 'dependencies': (List[Integer]) IDs of steps this one depends on.
+           #   - 'output_variable_name': (String) Variable name for this step's output.
+           #   - 'max_retries': (Integer, Default: 0) Max retry attempts for this step.
+           #   - 'retry_delay_seconds': (Integer, Default: 5) Delay before a retry.
+           #   - 'retry_on_statuses': (List[String], Default: ["error"]) Statuses that trigger retry.
 
-               # The previous check `if not agent_name or not task_prompt:` is now covered by the detailed validation loop above.
-               # However, an explicit check for agent existence is still good.
+           # Proceed with execution if plan is valid
+           for step in sorted(plan_list, key=lambda x: x.get('step_id', 0)):
+               step_id = step.get("step_id")
+               agent_name = step.get("agent_name")
+               task_prompt = step.get("task_prompt", "")
+               dependencies = step.get("dependencies", [])
+               output_var_name = step.get("output_variable_name")
+
+               # Retrieve retry parameters for the step, with defaults
+               max_retries = step.get("max_retries", 0)
+               retry_delay_seconds = step.get("retry_delay_seconds", 5)
+               retry_on_statuses = step.get("retry_on_statuses", ["error"])
+
+               current_step_retries = 0
+
                target_agent = next((a for a in self.agents if a.name == agent_name), None)
                if not target_agent:
                    current_attempt_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": f"Agent '{agent_name}' not found for step {step_id}."})
                    plan_succeeded_this_attempt = False; break
 
-               current_task_prompt = task_prompt
-               for dep_id in dependencies:
-                   dep_output_key_to_find = None
-                   # Find the original step definition to get its output_variable_name
-                   for prev_step_def in plan_list:
-                       if prev_step_def.get("step_id") == dep_id:
-                           dep_output_key_to_find = prev_step_def.get("output_variable_name", f"step_{dep_id}_output")
-                           break
+               while True: # Inner loop for step execution and retries
+                   current_task_prompt = task_prompt
+                   for dep_id in dependencies:
+                       dep_output_key_to_find = None
+                       for prev_step_def in plan_list: # Find the dependency step's output_variable_name
+                           if prev_step_def.get("step_id") == dep_id:
+                               dep_output_key_to_find = prev_step_def.get("output_variable_name", f"step_{dep_id}_output")
+                               break
+                       if dep_output_key_to_find and dep_output_key_to_find in step_outputs:
+                           current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(step_outputs[dep_output_key_to_find]))
+                       else:
+                           print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found for step {step_id}. Prompt may be incomplete.")
 
-                   if dep_output_key_to_find and dep_output_key_to_find in step_outputs:
-                       current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(step_outputs[dep_output_key_to_find]))
-                   else:
-                       print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found for step {step_id}. Prompt may be incomplete.")
+                   log_prompt = f"Executing step {step_id}"
+                   if current_step_retries > 0:
+                       log_prompt += f" (Retry {current_step_retries}/{max_retries})"
+                   log_prompt += f": Agent='{agent_name}', Prompt='{current_task_prompt[:100]}...'"
+                   print(log_prompt)
 
-               print(f"Executing step {step_id}: Agent='{agent_name}', Prompt='{current_task_prompt[:100]}...'")
-               step_result = await self.execute_agent(target_agent, current_task_prompt)
-               current_attempt_results.append(step_result)
+                   step_result = await self.execute_agent(target_agent, current_task_prompt)
 
-               if step_result.get("status") == "success":
-                   key_to_store = output_var_name if output_var_name else f"step_{step_id}_output"
-                   step_outputs[key_to_store] = step_result.get("response")
+                   # If successful, break retry loop and process result
+                   if step_result.get("status") == "success":
+                       current_attempt_results.append(step_result) # Add success result
+                       key_to_store = output_var_name if output_var_name else f"step_{step_id}_output"
+                       step_outputs[key_to_store] = step_result.get("response")
+                       # Store rich media paths if available
+                       for media_key in ["image_path", "frame_path", "gif_path", "speech_path", "modified_file"]:
+                           if media_key in step_result:
+                               step_outputs[f"{key_to_store}_{media_key}"] = step_result[media_key]
+                       break # Exit retry loop for this step
 
-                   if "image_path" in step_result: step_outputs[f"{key_to_store}_image_path"] = step_result["image_path"]
-                   if "frame_path" in step_result: step_outputs[f"{key_to_store}_frame_path"] = step_result["frame_path"]
-                   if "gif_path" in step_result: step_outputs[f"{key_to_store}_gif_path"] = step_result["gif_path"]
-                   if "speech_path" in step_result: step_outputs[f"{key_to_store}_speech_path"] = step_result["speech_path"]
-               else:
-                   print(f"Step {step_id} (Agent: {agent_name}) failed. Plan attempt {current_attempt} halted.")
-                   plan_succeeded_this_attempt = False; break
+                   # If failed, check retry conditions
+                   current_step_retries += 1
+                   if current_step_retries <= max_retries and step_result.get("status") in retry_on_statuses:
+                       print(f"Step {step_id} failed with status '{step_result.get('status')}'. Retrying in {retry_delay_seconds}s... ({current_step_retries}/{max_retries})")
+                       await asyncio.sleep(retry_delay_seconds)
+                       # The loop will continue for a retry
+                   else: # Retries exhausted or status not eligible for retry
+                       print(f"Step {step_id} (Agent: {agent_name}) failed permanently after {current_step_retries-1} retries or due to non-retryable status '{step_result.get('status')}'. Plan attempt {current_attempt} halted.")
+                       current_attempt_results.append(step_result) # Add final failure result
+                       plan_succeeded_this_attempt = False
+                       break # Exit retry loop for this step
+
+               if not plan_succeeded_this_attempt: # If a step failed permanently, break the outer plan execution loop
+                   break
 
            final_execution_results = current_attempt_results
            if plan_succeeded_this_attempt:
