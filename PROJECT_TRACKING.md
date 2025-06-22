@@ -36,7 +36,7 @@
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
-**Overall AGI Orchestrator Progress:** ~20-25% (V1 foundations, V1.x enhancements in MasterPlanner orchestration & Knowledge Base, and the new Inter-Agent Message Bus foundation contribute to this).
+**Overall AGI Orchestrator Progress:** ~22-27% (V1 foundations, V1.x enhancements in MasterPlanner orchestration, Knowledge Base, Inter-Agent Message Bus, and initial User Feedback Mechanisms contribute to this).
 
 ### Phase X: Advanced Cognitive Orchestration
 *Key Objectives:*
@@ -52,10 +52,10 @@
 ### Phase Y: System Learning, Memory & Adaptation
 *Key Objectives:*
 *   [X] **Persistent & Adaptive Knowledge Base:** (Core implemented)
-    *   [X] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations) - *ChromaDB backend, store/retrieve methods, UI explorer implemented. Initial data types: doc excerpts, web summaries, code explanations/generations.*
+    *   [X] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations) - *ChromaDB backend, store/retrieve methods, UI explorer implemented. Initial data types: doc excerpts, web summaries, code explanations/generations, plan execution logs.*
     *   [ ] Hybrid DB approach (vector + graph) - *Currently vector-only.*
-*   [ ] **Comprehensive User Feedback Loop & Reinforcement Learning:**
-    *   [ ] Explicit user feedback mechanisms (ratings, corrections)
+*   [X] **Comprehensive User Feedback Loop & Reinforcement Learning:** (Initial feedback collection implemented)
+    *   [X] Explicit user feedback mechanisms (ratings, corrections) - *UI widgets for feedback (positive/negative/comment) added to key AGI outputs. Feedback is logged to a file and an event is published on the message bus.*
     *   [ ] RL frameworks for adjusting behavior, prompts, tool selection
 *   [X] **Knowledge Ingestion & Synthesis:** (Basic agent-driven ingestion implemented)
     *   [X] Autonomous ingestion from documents/links - *WebCrawler and DocumentProcessor (via UI) now store processed content/summaries in KB. CodeMaster stores explanations/generations.*
