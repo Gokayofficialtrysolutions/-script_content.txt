@@ -1803,19 +1803,100 @@ class TerminusOrchestrator:
                                    meta_preview = str(res_item.get('metadata', '{}'))[:100] # Preview of metadata
                                    formatted_kb_entries.append(f"  Result {i_res+1}: \"{doc_preview}...\" (Metadata: {meta_preview}...)")
                                if formatted_kb_entries:
-                                   retrieved_kb_context_for_plan = "Previously retrieved relevant information from Knowledge Base:\n" + "\n".join(formatted_kb_entries)
-                                   print(f"MasterPlanner: Context built from KB:\n{retrieved_kb_context_for_plan}")
+                                   retrieved_kb_context_for_plan = "General Context from Knowledge Base:\n" + "\n".join(formatted_kb_entries) # Label this context
+                                   print(f"MasterPlanner: General context built from KB:\n{retrieved_kb_context_for_plan}")
                            else:
-                               print(f"MasterPlanner: Knowledge Base retrieval failed or found no results for query '{generated_kb_query}'. Message: {kb_results.get('message')}")
+                               print(f"MasterPlanner: General KB retrieval failed or found no results for query '{generated_kb_query}'. Message: {kb_results.get('message')}")
                        elif generated_kb_query.upper() == "NO_QUERY_NEEDED":
-                           print("MasterPlanner: LLM indicated no KB query needed.")
+                           print("MasterPlanner: LLM indicated no general KB query needed.")
                    else:
-                       print("MasterPlanner: MasterPlanner agent not found, cannot generate KB query.")
-               else:
-                   print("MasterPlanner: Knowledge Base not available, skipping preliminary query.")
+                       print("MasterPlanner: MasterPlanner agent not found, cannot generate general KB query.")
+               else: # KB collection not available
+                   print("MasterPlanner: Knowledge Base not available, skipping all preliminary queries.")
+
+               # --- Step 1b: Targeted Query for Past Plan Execution Logs ---
+               retrieved_plan_log_context_for_plan = "" # Initialize
+               if self.knowledge_collection is not None and first_attempt_nlu_output.get("intent"): # Use NLU output from Step 2 (run before this block)
+                   primary_intent_for_log_query = first_attempt_nlu_output.get("intent")
+                   # Construct a query text for plan logs - could be user_prompt or key entities
+                   # For now, using user_prompt for broader search, filtered by intent.
+                   plan_log_query_text = user_prompt
+
+                   print(f"MasterPlanner: Querying KB for past plan execution logs related to intent '{primary_intent_for_log_query}'.")
+                   plan_log_kb_results = await self.retrieve_knowledge(
+                       query_text=plan_log_query_text,
+                       n_results=2, # Fetch 1-2 most relevant past plan logs
+                       filter_metadata={"source": "plan_execution_log", "primary_intent": primary_intent_for_log_query}
+                   )
+                   if plan_log_kb_results.get("status") == "success" and plan_log_kb_results.get("results"):
+                       formatted_plan_log_entries = []
+                       # Processing of these logs into summaries will happen in the next plan step.
+                       # For now, we just store them to be passed to the main prompt construction.
+                       # This variable will be further processed later.
+                       retrieved_plan_log_context_for_plan = plan_log_kb_results.get("results")
+                       print(f"MasterPlanner: Found {len(retrieved_plan_log_context_for_plan)} relevant plan execution log(s).")
+                   else:
+                       print(f"MasterPlanner: No relevant plan execution logs found or retrieval failed. Message: {plan_log_kb_results.get('message')}")
+               elif self.knowledge_collection is None:
+                    print("MasterPlanner: Knowledge Base not available, skipping plan log query.")
+               elif not first_attempt_nlu_output.get("intent"):
+                    print("MasterPlanner: No primary intent identified from NLU, skipping targeted plan log query.")
+
+               # --- Process Retrieved Plan Logs for Prompt ---
+               formatted_plan_log_insights = []
+               if isinstance(retrieved_plan_log_context_for_plan, list): # Ensure it's a list of results
+                   for log_entry_kb_hit in retrieved_plan_log_context_for_plan: # Iterate through KB hits
+                       try:
+                           log_document_str = log_entry_kb_hit.get("document")
+                           if log_document_str:
+                               log_data = json.loads(log_document_str) # Parse the JSON string content
+
+                               # Extract concise info for the prompt
+                               log_status = log_data.get("execution_summary", {}).get("overall_status", "N/A")
+                               # Use original_user_request from the log, not the current user_prompt
+                               log_orig_req_preview = log_data.get("original_user_request", "N/A")[:75] + "..."
+                               log_user_summary = log_data.get("user_facing_plan_outcome_summary", "N/A")[:100] + "..."
+                               log_intent = log_data.get("nlu_analysis_on_request", {}).get("intent", "N/A")
+
+                               summary_str = (f"- Past execution for intent '{log_intent}' (request preview: '{log_orig_req_preview}') "
+                                              f"had status: '{log_status}'. User summary: '{log_user_summary}'")
+                               formatted_plan_log_insights.append(summary_str)
+                       except json.JSONDecodeError:
+                           print(f"Warning: Could not parse a plan execution log from KB (document field): {str(log_document_str)[:100]}...")
+                       except Exception as e:
+                           print(f"Warning: Error processing a plan execution log from KB: {str(e)}")
+
+               # This variable will then be incorporated into kb_context_section_for_main_prompt in the next step
+               processed_plan_logs_str_for_prompt = ""
+               if formatted_plan_log_insights:
+                   processed_plan_logs_str_for_prompt = "\n".join(formatted_plan_log_insights)
+                   print(f"MasterPlanner: Processed {len(formatted_plan_log_insights)} plan logs for prompt context.")
+               # If no logs or processing failed, it remains an empty string.
+
 
                # --- Step 2: Intent Classification & Entity Recognition (Now combined) ---
-               nlu_output_from_classify = await self.classify_user_intent(user_prompt) # This now returns intent and entities
+               # This was moved to be *before* KB queries in the previous commit to get first_attempt_nlu_output.
+               # So, first_attempt_nlu_output is already populated here.
+               # nlu_output_from_classify = await self.classify_user_intent(user_prompt) # This now returns intent and entities
+               # first_attempt_nlu_output = nlu_output_from_classify # Store for end-of-plan summary
+
+               # The construction of first_attempt_intent_info string using first_attempt_nlu_output
+               # (which was done after NLU) should remain, as it's used in prompts.
+               # This means NLU (Step 2) must logically run before KB queries (Step 1a and 1b) if its output is needed for KB queries.
+               # Let's adjust the order: NLU first, then KB queries.
+
+               # (The following NLU processing and first_attempt_intent_info string construction
+               #  is assumed to have happened *before* this KB query block, using 'first_attempt_nlu_output')
+
+               # Placeholder for where NLU processing results were prepared for 'first_attempt_intent_info'
+               # This string (`first_attempt_intent_info`) is already correctly formed based on `first_attempt_nlu_output`.
+               # The actual NLU call is now at the beginning of the "if current_attempt == 1:" block.
+
+               # The KB query for plan logs now correctly uses `first_attempt_nlu_output.get("intent")`.
+               # The general KB query prompt also correctly uses `first_attempt_intent_info`.
+
+               # No change to this part, it's just for context of where this diff fits
+               # Keyword-based history selection for the first attempt's prompt
                first_attempt_nlu_output = nlu_output_from_classify # Store for end-of-plan summary
 
                intent_str_part = "N/A"
@@ -1872,17 +1953,20 @@ class TerminusOrchestrator:
 
                # Prepare KB context string for the main prompt
                kb_context_section_for_main_prompt = ""
-               if retrieved_kb_context_for_plan: # This was populated in the KB query step
-                   kb_context_section_for_main_prompt = f"Consider the following potentially relevant information retrieved from the knowledge base:\n{retrieved_kb_context_for_plan}\n\n"
+               if retrieved_kb_context_for_plan: # This is general context (previously retrieved_kb_context_for_plan)
+                   kb_context_section_for_main_prompt += f"General Context from Knowledge Base:\n{retrieved_kb_context_for_plan}\n\n"
+
+               if processed_plan_logs_str_for_prompt: # This is from the newly processed plan logs
+                   kb_context_section_for_main_prompt += f"Insights from relevant past plan executions (use these to improve current plan or avoid past mistakes):\n{processed_plan_logs_str_for_prompt}\n\n"
 
                current_planner_prompt = (
                    f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents.\n\n"
                    f"{history_context_for_prompt}" # Use keyword-selected history
-                   f"{kb_context_section_for_main_prompt}" # Add KB context here
+                   f"{kb_context_section_for_main_prompt}" # Add combined KB context (general + plan logs) here
                    f"Analyze the following CURRENT user request: '{user_prompt}'\n"
                    f"NLU Analysis of Request: {first_attempt_intent_info}\n\n" # NLU analysis (intent & entities) explicitly provided
                    f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
-                   f"Based on the user request, conversation history, any provided knowledge base information, and especially the NLU Analysis (intent and entities), create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
+                   f"Based on the user request, conversation history, any provided knowledge base information (including general context and insights from past plan executions), and especially the NLU Analysis (intent and entities), create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
                    f"  - 'step_id': (Integer or String) A unique sequential identifier for the step (e.g., 1, 2, '2a').\n"
                    f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above), OR the special value 'parallel_group'.\n"
                    f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent. (Not used if agent_name is 'parallel_group').\n"
