@@ -1986,7 +1986,7 @@ def main():
    # Sidebar Controls
    with st.sidebar:
        st.header("COMMAND CENTER")
-       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Image Generation", "Video Processing", "Audio Processing", "Code Generation","Data Analysis","Creative Suite"])
+       operation_mode=st.selectbox("Operation Mode",["Multi-Agent Chat","Document Processing","Web Intelligence","Image Generation", "Video Processing", "Audio Processing", "Code Generation","Data Analysis","Creative Suite", "Knowledge Base Explorer"])
 
        st.subheader("Agent Selection")
        agent_names=[a.name for a in orchestrator.agents]
@@ -2544,6 +2544,67 @@ def main():
                         st.text_area(f"Top {top_n_processes} Processes:", value=result_list[0].get("data", "No data"), height=300, disabled=True, key="top_processes_output_v3")
                     else:
                         st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
+
+   elif operation_mode == "Knowledge Base Explorer": # New Block
+       st.subheader("🧠 KNOWLEDGE BASE EXPLORER")
+
+       query_text = st.text_input("Enter your search query for the Knowledge Base:", key="kb_query_text")
+
+       col1, col2, col3 = st.columns([2,1,1])
+       with col1:
+           n_results = st.number_input("Number of results to retrieve:", min_value=1, max_value=50, value=5, key="kb_n_results") # Increased max to 50
+       with col2:
+           filter_key = st.text_input("Metadata filter key (optional):", placeholder="e.g., filename", key="kb_filter_key")
+       with col3:
+           filter_value = st.text_input("Metadata filter value (optional):", placeholder="e.g., report.pdf", key="kb_filter_value")
+
+       if st.button("Search Knowledge Base", key="kb_search_button"):
+           if not query_text:
+               st.warning("Please enter a search query.")
+           else:
+               filter_metadata_dict = None
+               if filter_key and filter_value:
+                   filter_metadata_dict = {filter_key.strip(): filter_value.strip()}
+               elif filter_key and not filter_value:
+                   st.warning(f"Filter key '{filter_key}' provided, but no filter value. Ignoring filter.")
+               elif not filter_key and filter_value:
+                   st.warning(f"Filter value '{filter_value}' provided, but no filter key. Ignoring filter.")
+
+               with st.spinner("Searching knowledge base..."):
+                   kb_response = asyncio.run(orchestrator.retrieve_knowledge(
+                       query_text=query_text,
+                       n_results=n_results,
+                       filter_metadata=filter_metadata_dict
+                   ))
+
+               if kb_response and kb_response.get("status") == "success":
+                   results = kb_response.get("results", [])
+                   if results:
+                       st.success(f"Found {len(results)} results for '{query_text}':")
+                       for i, item in enumerate(results):
+                           expander_title = f"Result {i+1}: ID `{item.get('id', 'N/A')}` (Distance: {item.get('distance', float('nan')):.4f})"
+                           with st.expander(expander_title):
+                               st.text_area(
+                                   "Document Content:",
+                                   value=str(item.get('document', 'N/A')),
+                                   height=150,
+                                   disabled=True,
+                                   key=f"kb_doc_{item.get('id', i)}" # Ensure unique key
+                               )
+                               metadata_content = item.get('metadata')
+                               if metadata_content:
+                                   st.markdown("**Metadata:**")
+                                   st.json(metadata_content)
+                               else:
+                                   st.caption("No metadata for this item.")
+                           st.divider()
+                   else:
+                       st.info(f"No results found in the Knowledge Base for your query: '{query_text}'.")
+               elif kb_response: # Error from orchestrator
+                   st.error(f"Failed to search knowledge base: {kb_response.get('message', 'Unknown error')}")
+               else: # Should not happen if orchestrator always returns a dict
+                   st.error("An unexpected issue occurred while searching the knowledge base.")
+
 
 if __name__=="__main__":
    main()
