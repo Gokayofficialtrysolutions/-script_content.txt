@@ -1533,15 +1533,37 @@ class TerminusOrchestrator:
        # Store classified intent from the first attempt to reuse in revisions
        first_attempt_intent_info = "No specific intent pre-classified or low confidence."
        retrieved_kb_context_for_plan = "" # Initialize variable to store KB context
+       detailed_failure_context_for_revision = {} # Will store specific failure details for the revision prompt
 
        while current_attempt <= max_revision_attempts:
            current_attempt += 1
            print(f"MasterPlanner Attempt: {current_attempt}/{max_revision_attempts + 1}")
 
-           current_planner_prompt = ""
+           # Store the plan string that's being used for *this* attempt, for potential revision context
+           plan_json_str_for_this_attempt = ""
+           if current_attempt == 1:
+               plan_json_str_for_this_attempt = original_plan_json_str # This is set before the loop from the first LLM call
+           else:
+               # For revisions, current_plan_json_str holds the plan from the *previous* LLM call (the one we are now trying to execute)
+               plan_json_str_for_this_attempt = current_plan_json_str
+
+
+           current_planner_prompt = "" # This will be set if we need to generate a new plan (first attempt or revision)
            dynamic_agents_description = self.get_agent_capabilities_description()
 
            if current_attempt == 1: # Only attempt KB query and intent classification on the first attempt
+               # (This section generates 'original_plan_json_str' if it's the very first run,
+               # or 'current_plan_json_str' if it's a revision that needs a fresh plan from LLM)
+               # The KB query and intent classification are done here.
+               # ... (KB query and intent classification logic as before) ...
+               # This block also constructs the first `current_planner_prompt`
+               # and then calls the LLM to get `current_plan_json_str` (which is stored as `original_plan_json_str` if attempt == 1)
+
+               # For clarity, let's assume after this block, if successful,
+               # 'current_plan_json_str' holds the JSON plan string from the LLM for the first attempt.
+               # And 'original_plan_json_str' is a copy of it.
+               # 'plan_json_str_for_this_attempt' will be this 'original_plan_json_str'.
+
                # --- Step 1: Preliminary KB Query (if KB is available) ---
                if self.knowledge_collection is not None:
                    print("MasterPlanner: Attempting preliminary Knowledge Base query.")
@@ -1704,19 +1726,45 @@ class TerminusOrchestrator:
                history_string_for_prompt = "\n".join(history_for_prompt_list)
                history_context_for_prompt = f"Full conversation history (for context, most recent is last):\n{history_string_for_prompt}\n\n" if history_string_for_prompt else ""
 
+               # Construct the detailed failure context string for the prompt
+               failure_context_prompt_section = "--- DETAILED FAILURE CONTEXT ---\n"
+               failed_plan_str = detailed_failure_context_for_revision.get("plan_that_failed_this_attempt", original_plan_json_str) # Fallback to original if specific one not caught
+               failure_context_prompt_section += f"Plan that Failed This Attempt:\n```json\n{failed_plan_str}\n```\n\n"
+
+               failed_step_def_prompt = "Not specifically captured."
+               if detailed_failure_context_for_revision.get("failed_step_definition"):
+                   try: failed_step_def_prompt = json.dumps(detailed_failure_context_for_revision["failed_step_definition"], indent=2)
+                   except TypeError: failed_step_def_prompt = str(detailed_failure_context_for_revision["failed_step_definition"])
+               failure_context_prompt_section += f"Failed Step/Group Definition:\n```json\n{failed_step_def_prompt}\n```\n\n"
+
+               failed_step_exec_res_prompt = "Not specifically captured."
+               if detailed_failure_context_for_revision.get("failed_step_execution_result"):
+                   try: failed_step_exec_res_prompt = json.dumps(detailed_failure_context_for_revision["failed_step_execution_result"], indent=2)
+                   except TypeError: failed_step_exec_res_prompt = str(detailed_failure_context_for_revision["failed_step_execution_result"])
+               failure_context_prompt_section += f"Last Execution Result of Failed Step/Group:\n```json\n{failed_step_exec_res_prompt}\n```\n\n"
+
+               step_outputs_prompt = "None available or not captured."
+               if detailed_failure_context_for_revision.get("step_outputs_before_failure"):
+                   try: step_outputs_prompt = json.dumps(detailed_failure_context_for_revision["step_outputs_before_failure"], indent=2)
+                   except TypeError: step_outputs_prompt = str(detailed_failure_context_for_revision["step_outputs_before_failure"])
+               failure_context_prompt_section += f"Available Data Outputs from Prior Successful Steps (at time of failure):\n```json\n{step_outputs_prompt}\n```\n"
+               failure_context_prompt_section += "--- END DETAILED FAILURE CONTEXT ---\n\n"
+
                current_planner_prompt = (
-                   f"You are the MasterPlanner. Your previous attempt to create a plan for the user request resulted in an error or an unexecutable plan. Review the original plan, the user's request, the failed step details, and provide a revised JSON plan.
-"
-                   f"{history_context_for_prompt}"
-                   f"Original User Request: '{user_prompt}'\n\n"
-                   f"{first_attempt_intent_info}\n\n" # Use intent from first attempt
-                   f"Original Plan (that failed or was problematic):\n{original_plan_json_str}\n\n"
-                   f"Details of the failed step from the last execution attempt:\n{failed_step_details_json}\n\n"
+                   f"You are the MasterPlanner. A previous attempt to execute a plan for the user's request has failed. Your task is to analyze the failure and provide a revised JSON plan.\n\n"
+                   f"Conversation History (for overall context):\n{history_context_for_prompt}\n"
+                   f"Original User Request: '{user_prompt}'\n"
+                   f"Initial Classified Intent: {first_attempt_intent_info}\n\n"
+                   f"{failure_context_prompt_section}" # Insert detailed failure context
                    f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
-                   f"Based on all this information, provide a revised JSON plan. Ensure the new plan addresses the previous failure. "
-                   f"Use the same JSON structure as before (list of steps with 'step_id', 'agent_name', 'task_prompt', 'dependencies', 'output_variable_name').
-"
-                   f"IMPORTANT: Output ONLY the revised JSON plan as a raw string. Do not include any other text. If you determine the original plan cannot be improved or the task is unplannable with the given information and agents, return an empty JSON list []."
+                   f"Revision Instructions:\n"
+                   f"1. Analyze the 'DETAILED FAILURE CONTEXT' carefully, especially the 'Failed Step/Group Definition', its 'Last Execution Result', and the 'Available Data Outputs from Prior Successful Steps'.\n"
+                   f"2. Your goal is to produce a revised JSON plan that addresses the failure. Try to make MINIMAL and TARGETED changes to the 'Plan that Failed This Attempt' where possible.\n"
+                   f"3. If the failed step can be fixed by modifying its prompt, parameters, or by choosing a slightly different agent, prioritize that. Explain any significant deviations briefly if you must make them.\n"
+                   f"4. If subsequent steps are directly affected by the change to the failed step (e.g., their input dependencies change), adjust them as necessary.\n"
+                   f"5. Ensure the revised plan is coherent and still aims to fulfill the original user request.\n"
+                   f"6. Return a COMPLETE, VALID JSON plan using the same overall schema as before (list of step objects, including for parallel groups if appropriate).\n\n"
+                   f"IMPORTANT: Output ONLY the revised JSON plan as a raw string. Do not include any other text. If you determine the plan cannot be salvaged or the task is unplannable with the given information and agents, return an empty JSON list []."
                )
 
            master_planner_agent = next((agent for agent in self.agents if agent.name == "MasterPlanner"), None)
@@ -1929,6 +1977,42 @@ class TerminusOrchestrator:
            # If loop finished due to plan failure (plan_succeeded_this_attempt is False)
            # and there are more overall plan revision attempts, the outer 'while current_attempt <= max_revision_attempts' will continue.
            # If revisions are exhausted, it will also break from the outer while.
+
+           # These will be populated if the for-loop below breaks due to plan_succeeded_this_attempt = False
+           _captured_failed_step_def_for_revision = None
+           _captured_failed_step_result_for_revision = None
+
+           # --- This is where the 'for step_definition in sorted(plan_list, ...)' loop starts ---
+           # ... (loop content as it is, including sequential and parallel group handling) ...
+           # Inside that loop, when a step/group permanently fails and sets:
+           #   plan_succeeded_this_attempt = False
+           #   _captured_failed_step_def_for_revision = step_definition # Capture before break
+           #   _captured_failed_step_result_for_revision = group_step_result # Capture before break
+           #   break
+           # --- End of the 'for step_definition in sorted(plan_list, ...)' loop ---
+
+           detailed_failure_context_for_revision = {} # Reset for each attempt, populated only on failure of this attempt
+           if not plan_succeeded_this_attempt: # This is checked after the for-loop completes or breaks
+               if _captured_failed_step_def_for_revision and _captured_failed_step_result_for_revision:
+                    detailed_failure_context_for_revision = {
+                        "failed_step_definition": _captured_failed_step_def_for_revision,
+                        "failed_step_execution_result": _captured_failed_step_result_for_revision,
+                        "step_outputs_before_failure": dict(step_outputs),
+                        "plan_that_failed_this_attempt": plan_json_str_for_this_attempt
+                    }
+                    print(f"MasterPlanner: Captured detailed failure context for revision attempt {current_attempt + 1 if current_attempt <= max_revision_attempts else 'N/A'}.")
+               else:
+                    # This case might occur if plan_succeeded_this_attempt was False for other reasons,
+                    # or if the capture variables were not set (should not happen if loop breaks correctly).
+                    print(f"MasterPlanner: Plan attempt {current_attempt} failed, but specific step failure details were not captured directly. Using fallback.")
+                    fallback_error_detail = current_attempt_results[-1] if current_attempt_results and current_attempt_results[-1].get("status") != "success" else {"error": "Unknown error, no specific step result captured."}
+                    detailed_failure_context_for_revision = {
+                        "failed_step_definition": "Capture_Error: Could not identify specific failing step definition.",
+                        "failed_step_execution_result": fallback_error_detail,
+                        "step_outputs_before_failure": dict(step_outputs),
+                        "plan_that_failed_this_attempt": plan_json_str_for_this_attempt
+                    }
+
 
        # Summarization and history update for the assistant's response
        summarizer_agent = next((agent for agent in self.agents if agent.name == "CreativeWriter"), None)
