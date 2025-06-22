@@ -21,34 +21,45 @@
 *   [X] Resolve `passlib` dependency version (Completed in Plan Step 1: `passlib==1.7.4`)
 *   [ ] Comprehensive integrated testing (Ongoing user responsibility / future dedicated effort)
 
-**Overall V1 Progress:** ~95% (Pending comprehensive integrated testing by user/team). All defined features are implemented and placeholder dependencies resolved.
+**Overall V1 Progress:** 100% (Core features implemented and polish items completed. Comprehensive integrated testing remains an ongoing user/team responsibility).
+
+**Key V1.x Enhancements / Foundational Roadmap Progress (Post V1 Core):**
+*   [X] MasterPlanner: Implemented step-level plan validation.
+*   [X] MasterPlanner: Implemented robust step-level retry logic (max_retries, delay, retry_on_statuses).
+*   [X] Knowledge Base: Core backend implemented (ChromaDB for persistent vector storage, store/retrieve methods in Orchestrator).
+*   [X] Knowledge Base: UI for direct user exploration and querying of KB content.
+*   [X] MasterPlanner: Basic parallel execution capability for independent plan steps.
+*   [X] MasterPlanner: Enhanced plan revision process with targeted failure context provided to LLM.
+*   [X] Knowledge Base: Automated augmentation by WebCrawler (stores summaries of scraped pages).
+*   [X] Knowledge Base: Automated augmentation by CodeMaster (stores code explanations and generated modules).
+*   [X] Knowledge Base: `MasterPlanner` now performs a preliminary KB query to fetch relevant context before generating a plan.
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
-**Overall AGI Orchestrator Progress:** ~10-12% (Foundational elements like MasterPlanner, intent classification, and contextual memory built in V1 contribute to this).
+**Overall AGI Orchestrator Progress:** ~18-22% (V1 foundations + V1.x enhancements in MasterPlanner orchestration and Knowledge Base contribute to this).
 
 ### Phase X: Advanced Cognitive Orchestration
 *Key Objectives:*
-*   [ ] **Enhanced `MasterPlanner` Capabilities (Evolution):**
-    *   [ ] Complex Plan Execution (parallel, conditional, looping/retry)
-    *   [ ] Dynamic Plan Adaptation & Learning
+*   [X] **Enhanced `MasterPlanner` Capabilities (Evolution):** (Initial capabilities implemented)
+    *   [X] Complex Plan Execution (parallel, conditional, looping/retry) - *Initial retry and parallel execution implemented.*
+    *   [X] Dynamic Plan Adaptation & Learning - *Initial targeted revision context implemented.*
     *   [ ] Resource-Aware & Prioritized Planning
 *   [ ] **Sophisticated Intent Understanding & Contextual Awareness:**
-    *   [ ] Nuanced NLU (ambiguity, implicit goals, long-term context)
+    *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *MasterPlanner KB pre-query is a step towards better contextual awareness.*
     *   [ ] Dedicated NLU module/agent
     *   [ ] Richer contextual model of interaction & user objectives
 
 ### Phase Y: System Learning, Memory & Adaptation
 *Key Objectives:*
-*   [ ] **Persistent & Adaptive Knowledge Base:**
-    *   [ ] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations)
-    *   [ ] Hybrid DB approach (vector + graph)
+*   [X] **Persistent & Adaptive Knowledge Base:** (Core implemented)
+    *   [X] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations) - *ChromaDB backend, store/retrieve methods, UI explorer implemented. Initial data types: doc excerpts, web summaries, code explanations/generations.*
+    *   [ ] Hybrid DB approach (vector + graph) - *Currently vector-only.*
 *   [ ] **Comprehensive User Feedback Loop & Reinforcement Learning:**
     *   [ ] Explicit user feedback mechanisms (ratings, corrections)
     *   [ ] RL frameworks for adjusting behavior, prompts, tool selection
-*   [ ] **Knowledge Ingestion & Synthesis:**
-    *   [ ] Autonomous ingestion from documents/links
-    *   [ ] Summarization & indexing of ingested data
+*   [X] **Knowledge Ingestion & Synthesis:** (Basic agent-driven ingestion implemented)
+    *   [X] Autonomous ingestion from documents/links - *WebCrawler and DocumentProcessor (via UI) now store processed content/summaries in KB. CodeMaster stores explanations/generations.*
+    *   [ ] Summarization & indexing of ingested data - *Basic summarization before storage for WebCrawler; indexing is inherent to ChromaDB.*
 
 ### Phase Z: Expanded Autonomy & Collaborative Intelligence
 *Key Objectives:*

@@ -11,14 +11,22 @@ Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for po
     *   **AudioMaestro Agent:** Audio file analysis (get info), format conversion, and Text-to-Speech (TTS).
     *   **Enhanced CodeMaster:** Experimental AI-assisted code modification in projects, code explanation, and generation of new code modules/classes.
 *   **Sophisticated Orchestration Engine:**
-    *   **MasterPlanner Agent (Experimental):** Decomposes complex user requests into multi-step execution plans for other specialized agents.
-    *   **Contextual Agent Selection:** Orchestrator utilizes UI context (current operation mode) and zero-shot intent classification to improve automatic agent routing in Multi-Agent Chat.
-    *   **Conversational Memory:** Basic conversation history is maintained and provided as context to the MasterPlanner for more relevant follow-up actions.
+    *   **MasterPlanner Agent (Evolving):** Decomposes complex user requests into multi-step execution plans. Features include:
+        *   Step-level validation and robust retry mechanisms.
+        *   Basic parallel execution for independent tasks.
+        *   Targeted plan revision based on detailed failure context.
+        *   Preliminary Knowledge Base query to inform planning.
+    *   **Contextual Agent Selection:** Orchestrator utilizes UI context and zero-shot intent classification for improved agent routing.
+    *   **Conversational Memory:** Basic conversation history is maintained and provided as context to MasterPlanner.
+*   **Persistent Knowledge Base (ChromaDB):**
+    *   Stores and retrieves textual information (document excerpts, web summaries, code explanations/generations) via semantic search.
+    *   Includes a "Knowledge Base Explorer" in the Web UI for direct user querying.
+    *   Automatically augmented by agents like DocumentProcessor (via UI), WebCrawler, and CodeMaster.
 *   **Extensible Agent Configuration:** Agent capabilities and models can be configured via `agents.json`.
-*   **Model Management:** Model downloads are managed via `models.conf`, allowing selection of specific models.
-*   **Web UI:** Provides an interactive web interface using Streamlit for easy interaction with agents and tools.
-*   **Core Capabilities:** Offers document processing, web intelligence, and project scaffolding utilities.
-*   **Version-Pinned Dependencies:** Uses `*_requirements.txt` files with pinned versions for Python packages to ensure stability and reproducibility.
+*   **Model Management:** Model downloads are managed via `models.conf`.
+*   **Web UI (Streamlit):** Provides an interactive interface with various operation modes, including the new KB Explorer.
+*   **Core Capabilities:** Document processing, web intelligence, project scaffolding, system information.
+*   **Version-Pinned Dependencies:** Uses `*_requirements.txt` files with pinned versions for Python packages to ensure stability and reproducibility. All dependencies are pinned to specific versions.
 *   **Automated Setup:** A single bash script automates the installation of dependencies and components.
 
 ## Installation
@@ -55,8 +63,9 @@ The Web UI provides several operation modes:
 *   **Image Generation:** Create images from text prompts.
 *   **Video Processing:** Utilities for video file information, frame extraction, and GIF conversion.
 *   **Audio Processing:** Tools for audio analysis, format conversion, and Text-to-Speech.
-*   **Code Generation:** Scaffold new projects, modify existing code (experimental), explain code snippets, and generate code modules.
-*   Other modes for data analysis, etc., may be available.
+*   **Code Generation:** Scaffold new projects, modify existing code (experimental), explain code snippets, and generate code modules. (Explanations & generated modules are now stored in the Knowledge Base).
+*   **Knowledge Base Explorer:** Directly query and explore the contents of the system's persistent knowledge base.
+*   Other modes for data analysis, system information, etc., may be available.
 
 Select agents, adjust parameters like temperature, and input your queries or tasks through the UI.
 
@@ -66,4 +75,4 @@ Select agents, adjust parameters like temperature, and input your queries or tas
 *   **Agents (`agents.json`):** Located in `~/.terminus-ai/agents.json`. This file configures the available AI agents, their models, specialties, and active status. You can customize this file to add new agents or modify existing ones.
 
 ## Note on Dependencies
-The project uses version-pinned Python dependencies listed in `core_requirements.txt`, `frameworks_requirements.txt`, `utils_requirements.txt`, and `dev_requirements.txt` to ensure stability. Some newly added dependencies for specialized engines in these files (particularly in `core_requirements.txt` and `utils_requirements.txt` from recent updates) have placeholder versions (e.g., `X.Y.Z`) and will need to be updated to specific, stable versions for full functionality of those engines.
+The project uses version-pinned Python dependencies listed in `core_requirements.txt`, `frameworks_requirements.txt`, `utils_requirements.txt`, and `dev_requirements.txt`. All dependencies are pinned to specific, stable versions to ensure stability and reproducibility of the environment.

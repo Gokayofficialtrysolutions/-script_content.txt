@@ -484,15 +484,18 @@ class TerminusOrchestrator:
            # self.knowledge_collection will remain None, methods should check for this.
 
    async def _execute_single_plan_step(self, step_definition: Dict, full_plan_list: List[Dict], current_step_outputs: Dict) -> Dict:
-       """
-       Executes a single, non-parallel plan step, including its own retry logic.
-       Args:
-           step_definition: The dictionary defining the step to execute.
-           full_plan_list: The entire list of plan steps (used for resolving dependencies' output_variable_name).
-           current_step_outputs: Dictionary of outputs from already executed steps in the current plan attempt.
-       Returns:
-           A dictionary representing the result of the step execution.
-       """
+       # """ (Method Docstring as Comment)
+       # Executes a single, non-parallel plan step, including its own retry logic.
+       # This method is called for both regular sequential steps and for each sub-step within a parallel_group.
+       # Args:
+       #     step_definition: The dictionary defining the step to execute.
+       #     full_plan_list: The entire list of plan steps (used for resolving dependencies' output_variable_name,
+       #                     especially for sub-steps needing outputs from steps outside their parallel group).
+       #     current_step_outputs: Dictionary of outputs from already executed steps in the current plan attempt.
+       #                           This dictionary IS MODIFIED by this method if the step succeeds.
+       # Returns:
+       #     A dictionary representing the result of the step execution.
+       # """
        step_id = step_definition.get("step_id")
        agent_name = step_definition.get("agent_name")
        task_prompt = step_definition.get("task_prompt", "")
@@ -526,21 +529,56 @@ class TerminusOrchestrator:
                        break
 
                if dep_output_key_to_find and dep_output_key_to_find in current_step_outputs:
-                   # Check if the dependency output is a dictionary (e.g. from a parallel group)
-                   # and if the task_prompt is trying to access a sub-key
-                   # Example: {{{{agg_output.sub_output_A}}}}
-                   match = re.match(r"{{{{(\w+)\.(.+)}}}}", current_task_prompt)
-                   if match and match.group(1) == dep_output_key_to_find and isinstance(current_step_outputs[dep_output_key_to_find], dict):
-                       # This is a simplistic way to handle one level of sub-key access
-                       # A more robust template engine might be needed for complex cases
-                       sub_key = match.group(2)
-                       if sub_key in current_step_outputs[dep_output_key_to_find]:
-                           replacement_value = str(current_step_outputs[dep_output_key_to_find][sub_key])
-                           current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}.{sub_key}}}}}", replacement_value)
-                       else:
-                           print(f"Warning: Sub-key '{sub_key}' not found in output of dependency step {dep_id} (variable {dep_output_key_to_find}) for step {step_id}.")
-                   else: # Standard replacement
+                   # Dependency Resolution:
+                   # Check if the task_prompt is trying to access a sub-key of a dictionary-like output
+                   # (common if the dependency was a parallel_group that aggregated outputs).
+                   # Example: prompt contains '{{{{group_output_var.sub_step_output_var}}}}'
+                   # and 'group_output_var' in current_step_outputs is a dict.
+                   # This regex specifically looks for '{{{{main_key.sub_key}}}}' patterns.
+                   # It will attempt to replace these first if the main_key matches dep_output_key_to_find.
+                   # Note: This is a basic implementation for one level of nesting.
+                   # For more complex templating, a dedicated library might be better.
+
+                   # Try to match and replace sub-key access first
+                   # Pattern: {{base_variable_name.key_within_dictionary}}
+                   # We look for patterns like {{key.subkey}} where key matches dep_output_key_to_find
+                   # This is a bit simplistic as it would re-check all template variables for each dependency.
+                   # A more robust solution would parse all template vars first.
+                   # For now, this targets the specific case of parallel group outputs.
+
+                   # Simplistic sub-key replacement:
+                   # We are iterating through dependencies. If current dep_output_key_to_find is 'X',
+                   # and prompt has '{{X.Y}}', we try to replace '{{X.Y}}'.
+                   # If prompt also has '{{X}}' (less likely if also using subkey), it's handled after.
+
+                   # Try to find all instances of {{{{key.subkey}}}}
+                   # For each, if key matches dep_output_key_to_find, attempt replacement.
+                   # This is still not perfect, as the regex below is simple.
+                   # A full template substitution before this loop might be cleaner.
+
+                   # Revised logic for sub-key replacement:
+                   # Check if the current_task_prompt contains a pattern like '{{{{key.subkey}}}}'
+                   # where 'key' is the current dep_output_key_to_find.
+                   if isinstance(current_step_outputs[dep_output_key_to_find], dict):
+                       # Attempt to replace patterns like '{{{{dep_output_key_to_find.some_sub_key}}}}'
+                       # This regex finds all such patterns for the current dep_output_key_to_find
+                       # (This is still a simplified approach to templating)
+                       for sub_match in re.finditer(r"{{{{(" + re.escape(dep_output_key_to_find) + r")\.(\w+)}}}}", current_task_prompt):
+                           actual_base_var = sub_match.group(1) # Should be dep_output_key_to_find
+                           sub_key_to_access = sub_match.group(2)
+                           if sub_key_to_access in current_step_outputs[dep_output_key_to_find]:
+                               replacement_val = str(current_step_outputs[dep_output_key_to_find][sub_key_to_access])
+                               current_task_prompt = current_task_prompt.replace(sub_match.group(0), replacement_val)
+                               print(f"Info: Replaced template '{sub_match.group(0)}' with value for step {step_id}.")
+                           else:
+                               print(f"Warning: Sub-key '{sub_key_to_access}' for base '{actual_base_var}' not found in outputs for step {step_id}. Template '{sub_match.group(0)}' remains.")
+
+                   # Standard replacement for '{{dep_output_key_to_find}}' (if it still exists or was the original form)
+                   # This will replace the whole key if it wasn't a sub-key access or if sub-key access failed to find.
+                   if f"{{{{{dep_output_key_to_find}}}}}" in current_task_prompt: # Check if the simple key exists
                         current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(current_step_outputs[dep_output_key_to_find]))
+                        print(f"Info: Replaced template '{{{{{dep_output_key_to_find}}}}}' for step {step_id}.")
+
                elif dep_output_key_to_find: # Key was found in plan but not in outputs
                    print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found in current_step_outputs for step {step_id}. Prompt may be incomplete.")
                # If dep_output_key_to_find is None, the dependency wasn't in full_plan_list (should not happen if plan is valid)
@@ -572,6 +610,16 @@ class TerminusOrchestrator:
        return step_result # Should be unreachable if loop logic is correct, but as a fallback
 
    async def store_knowledge(self, content: str, metadata: Optional[Dict] = None, content_id: Optional[str] = None) -> Dict:
+       # """ (Method Docstring as Comment)
+       # Stores a piece of text content into the Knowledge Base (ChromaDB).
+       # Args:
+       #     content: The string content to store.
+       #     metadata: An optional dictionary of metadata (values should be str, int, float, bool).
+       #               Complex values will be stringified with a warning.
+       #     content_id: Optional unique ID for this content. If None, a UUID is generated.
+       # Returns:
+       #     A dictionary with status ('success'/'error'), ID of stored item, and a message.
+       # """
        if self.knowledge_collection is None:
            return {"status": "error", "message": "Knowledge base not initialized."}
 
@@ -618,6 +666,16 @@ class TerminusOrchestrator:
            return {"status": "error", "message": f"Failed to store knowledge: {str(e)}"}
 
    async def retrieve_knowledge(self, query_text: str, n_results: int = 5, filter_metadata: Optional[Dict] = None) -> Dict:
+       # """ (Method Docstring as Comment)
+       # Retrieves knowledge from ChromaDB based on semantic similarity to query_text.
+       # Args:
+       #     query_text: The text to search for.
+       #     n_results: Maximum number of results to return.
+       #     filter_metadata: Optional dictionary for metadata filtering (exact match on values).
+       # Returns:
+       #     A dictionary with status, a list of result items (each with id, document, metadata, distance),
+       #     and a message.
+       # """
        if self.knowledge_collection is None:
            return {"status": "error", "message": "Knowledge base not initialized.", "results": []}
 
