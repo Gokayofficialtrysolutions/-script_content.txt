@@ -1389,17 +1389,36 @@ class TerminusOrchestrator:
            plan_succeeded_this_attempt = True
            print(f"Executing plan with {len(plan_list)} steps (Attempt {current_attempt})...")
 
-           for step in sorted(plan_list, key=lambda x: x.get('step_id', 0)):
-               step_id = step.get("step_id")
-               agent_name = step.get("agent_name")
-               task_prompt = step.get("task_prompt", "")
-               dependencies = step.get("dependencies", [])
-               output_var_name = step.get("output_variable_name")
+           # Validate plan structure before execution
+           is_valid_plan = True
+           for i, step_def in enumerate(plan_list):
+               if not isinstance(step_def, dict):
+                   final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": f"Plan validation failed: Step {i+1} is not a dictionary. Plan: {current_plan_json_str[:500]}"}]
+                   is_valid_plan = False; break
+               required_keys = {"step_id": int, "agent_name": str, "task_prompt": str}
+               for key, expected_type in required_keys.items():
+                   if key not in step_def:
+                       final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": f"Plan validation failed: Step {step_def.get('step_id', i+1)} is missing required key '{key}'. Plan: {current_plan_json_str[:500]}"}]
+                       is_valid_plan = False; break
+                   if not isinstance(step_def[key], expected_type):
+                       final_execution_results = [{"status": "error", "agent": "MasterPlanner", "response": f"Plan validation failed: Step {step_def.get('step_id', i+1)} key '{key}' has incorrect type (expected {expected_type.__name__}, got {type(step_def[key]).__name__}). Plan: {current_plan_json_str[:500]}"}]
+                       is_valid_plan = False; break
+               if not is_valid_plan: break
 
-               if not agent_name or not task_prompt:
-                   current_attempt_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": "Invalid step: missing agent_name or task_prompt."})
-                   plan_succeeded_this_attempt = False; break
+           if not is_valid_plan:
+               if current_attempt >= max_revision_attempts: break # Break while loop if validation fails on last attempt
+               else: continue # Try revision if validation fails and more attempts are allowed
 
+           # Proceed with execution if plan is valid
+           for step in sorted(plan_list, key=lambda x: x.get('step_id', 0)): # Sorting already handles missing step_id for sorting key
+               step_id = step.get("step_id") # Already validated to exist and be int
+               agent_name = step.get("agent_name") # Already validated
+               task_prompt = step.get("task_prompt", "") # Already validated
+               dependencies = step.get("dependencies", []) # Optional
+               output_var_name = step.get("output_variable_name") # Optional
+
+               # The previous check `if not agent_name or not task_prompt:` is now covered by the detailed validation loop above.
+               # However, an explicit check for agent existence is still good.
                target_agent = next((a for a in self.agents if a.name == agent_name), None)
                if not target_agent:
                    current_attempt_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": f"Agent '{agent_name}' not found for step {step_id}."})
