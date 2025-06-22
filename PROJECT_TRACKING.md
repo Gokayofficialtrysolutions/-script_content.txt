@@ -1,6 +1,6 @@
-# Terminus AI - Project Tracking
+# Terminalis AGI - Project Tracking
 
-## Section 1: "Terminus AI - Version 1 Status (Current)"
+## Section 1: "Terminalis AGI - Version 1 Status (Current)"
 
 **Key Features (Functionally Complete for V1):**
 *   [X] Ollama Integration

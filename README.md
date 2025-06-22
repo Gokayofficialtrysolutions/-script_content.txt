@@ -1,6 +1,6 @@
-# Terminus AI - Ultimate Local AI Ecosystem
+# Terminalis AGI - Ultimate Local AI Ecosystem
 
-Terminus AI is a comprehensive, locally runnable AI ecosystem designed for power users and developers. It provides a suite of tools, numerous AI models, and a flexible agent orchestration system, all intended to run on your local machine.
+Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for power users and developers. It provides a suite of tools, numerous AI models, and a flexible agent orchestration system, all intended to run on your local machine.
 
 ## Key Features
 *   **Local First:** Designed to run primarily on your local hardware.
@@ -39,8 +39,8 @@ The main installation directory will be `~/.terminus-ai`. All logs and generated
 
 ## Post-Installation
 
-### Launching Terminus AI
-To launch the Terminus AI ecosystem:
+### Launching Terminalis AGI
+To launch the Terminalis AGI ecosystem:
 ```bash
 cd ~/.terminus-ai
 python3 launch_terminus.py

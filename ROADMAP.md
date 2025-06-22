@@ -1,6 +1,6 @@
-# Terminus AI - Roadmap Towards an Ultimate AGI Orchestrator
+# Terminalis AGI - Roadmap Towards an Ultimate AGI Orchestrator
 
-This document outlines a high-level, multi-phase vision for the continued development of Terminus AI, aiming towards the goal of creating an increasingly intelligent, capable, and autonomous "Ultimate AGI Orchestrator." Each phase represents a significant leap in capabilities.
+This document outlines a high-level, multi-phase vision for the continued development of Terminalis AGI, aiming towards the goal of creating an increasingly intelligent, capable, and autonomous "Ultimate AGI Orchestrator." Each phase represents a significant leap in capabilities.
 
 ## Guiding Principles
 *   **Local First, Cloud Optional:** Prioritize functionalities that can run on user hardware, with optional integration for cloud resources where beneficial.
@@ -23,7 +23,7 @@ This document outlines a high-level, multi-phase vision for the continued develo
 ## Phase Y: System Learning, Memory & Adaptation
 
 *   **Persistent & Adaptive Knowledge Base:**
-    *   Implement a robust mechanism for Terminus AI to store, retrieve, and manage diverse types of knowledge: factual information, procedural steps for tasks, summaries of previous interactions, user-specific preferences, and learned associations.
+    *   Implement a robust mechanism for Terminalis AGI to store, retrieve, and manage diverse types of knowledge: factual information, procedural steps for tasks, summaries of previous interactions, user-specific preferences, and learned associations.
     *   Utilize a hybrid approach, potentially combining local vector databases for semantic similarity searches with graph databases for representing complex relationships and structured knowledge.
 *   **Comprehensive User Feedback Loop & Reinforcement Learning:**
     *   Provide intuitive mechanisms for users to give explicit feedback (e.g., ratings, corrections) on agent actions, generated content, and overall plan success.
@@ -41,7 +41,7 @@ This document outlines a high-level, multi-phase vision for the continued develo
     *   Design and implement more advanced communication protocols for agents, enabling them to negotiate, share complex information (beyond simple text outputs), and coordinate actions for highly interdependent tasks.
     *   Explore concepts like multi-agent consensus building, task delegation, and shared understanding of goals.
 *   **Proactive & Goal-Oriented Assistance:**
-    *   Enhance capabilities for Terminus AI to proactively offer suggestions, identify potential optimizations in user workflows, or anticipate user needs based on context, learned patterns, and stated long-term goals.
+    *   Enhance capabilities for Terminalis AGI to proactively offer suggestions, identify potential optimizations in user workflows, or anticipate user needs based on context, learned patterns, and stated long-term goals.
     *   Allow users to define high-level objectives that the system can then autonomously work towards over extended periods.
 
 ## Phase W: System Self-Understanding & Meta-Cognition (Research Intensive)
@@ -76,7 +76,7 @@ This document outlines a high-level, multi-phase vision for the continued develo
     *   Incrementally integrate proven concepts from this research where feasible, safe, and aligned with the project's guiding principles.
 *   **Formalized Ethical AI & Safety Protocols:**
     *   As system autonomy and capability approach AGI-like levels, develop and implement increasingly formal safety protocols, value alignment strategies, and robust mechanisms for ensuring the explainability and controllability of complex AI decisions.
-    *   Engage with research on AI ethics and safety to ensure Terminus AI remains a beneficial and controllable tool.
+    *   Engage with research on AI ethics and safety to ensure Terminalis AGI remains a beneficial and controllable tool.
 *   **Resilience & Robustness:**
     *   Develop mechanisms for the system to gracefully handle unforeseen circumstances, novel problems, or significant disruptions to its environment or internal state, aiming for anti-fragility where appropriate.
 

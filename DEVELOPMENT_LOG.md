@@ -1,6 +1,6 @@
-# Terminus AI - Development Log & Process Summary (Z Report)
+# Terminalis AGI - Development Log & Process Summary (Z Report)
 
-This document summarizes the major phases, key features implemented, and significant decisions made during the development and enhancement of the Terminus AI ecosystem.
+This document summarizes the major phases, key features implemented, and significant decisions made during the development and enhancement of the Terminalis AGI ecosystem.
 
 ## Phase 0: Initial Codebase Analysis & Weakness Identification
 *   **Objective:** Understand the initial `script_content.txt` and identify areas for improvement.

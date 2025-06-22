@@ -1,6 +1,6 @@
-# Contributing to Terminus AI
+# Contributing to Terminalis AGI
 
-We welcome contributions to Terminus AI! Whether it's bug fixes, new features, documentation improvements, or model additions, your help is appreciated.
+We welcome contributions to Terminalis AGI! Whether it's bug fixes, new features, documentation improvements, or model additions, your help is appreciated.
 
 ## How to Contribute
 1.  **Fork the repository.**
