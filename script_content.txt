@@ -353,6 +353,12 @@ create_agent_orchestration_script() {
     "model": "pydub/pyttsx3",
     "specialty": "Audio Processing & TTS",
     "active": true
+  },
+  {
+    "name": "ContentAnalysisAgent",
+    "model": "llama3.1:70b",
+    "specialty": "Performs deeper analysis of text content (e.g., keyword extraction, topic modeling) to enrich knowledge base entries. Often triggered by system events.",
+    "active": true
   }
 ]
 AGENTS_EOF
@@ -511,11 +517,107 @@ class TerminusOrchestrator:
 
    def _setup_initial_event_listeners(self):
        # Subscribe built-in handlers here
+        # General system event logger (catches all KB events for now)
        self.subscribe_to_message("kb.webcontent.added", self._handle_system_event)
-       self.subscribe_to_message("kb.code_explanation.added", self._handle_system_event) # For CodeMaster
-       self.subscribe_to_message("kb.code_module.added", self._handle_system_event)   # For CodeMaster
-       self.subscribe_to_message("kb.plan_execution_log.added", self._handle_system_event) # For MasterPlanner logs
-       # Add more general system event subscriptions if needed
+       self.subscribe_to_message("kb.code_explanation.added", self._handle_system_event)
+       self.subscribe_to_message("kb.code_module.added", self._handle_system_event)
+       self.subscribe_to_message("kb.plan_execution_log.added", self._handle_system_event)
+       # Add more general system event subscriptions if needed using _handle_system_event
+
+       # Subscribe ContentAnalysisAgent's handler to specific KB addition events
+       kb_content_added_event_types = [
+           "kb.webcontent.added",
+           "kb.code_explanation.added",
+           "kb.code_module.added",
+           "kb.plan_execution_log.added",
+           "kb.document_excerpt.added" # For uploads from UI - event to be added in UI step
+       ]
+       for event_type in kb_content_added_event_types:
+           self.subscribe_to_message(event_type, self._handle_new_kb_content_for_analysis)
+
+   async def _handle_new_kb_content_for_analysis(self, message: Dict):
+       # """ (Handler Docstring as Comment)
+       # Reacts to messages indicating new content has been added to the KB.
+       # Retrieves the content, performs keyword extraction using an LLM,
+       # and updates the KB item's metadata with these keywords.
+       # """
+       print(f"[ContentAnalysisHandler] Received message: {message.get('message_type')} for kb_id: {message.get('payload', {}).get('kb_id')}")
+       if self.knowledge_collection is None:
+           print("[ContentAnalysisHandler] Knowledge base not available. Skipping analysis.")
+           return
+
+       payload = message.get("payload", {})
+       kb_id = payload.get("kb_id")
+       source_content_type = message.get("message_type", "unknown_kb_content") # e.g. kb.webcontent.added
+
+       if not kb_id:
+           print("[ContentAnalysisHandler] No kb_id in message payload. Cannot process.")
+           return
+
+       try:
+           # 1. Retrieve the document content from KB
+           print(f"[ContentAnalysisHandler] Retrieving content for kb_id: {kb_id}")
+           item_data = self.knowledge_collection.get(ids=[kb_id], include=["documents", "metadatas"])
+
+           if not item_data or not item_data.get('ids') or not item_data['ids'][0]:
+               print(f"[ContentAnalysisHandler] KB item with ID '{kb_id}' not found for analysis.")
+               return
+
+           document_content = item_data['documents'][0]
+           if not document_content:
+               print(f"[ContentAnalysisHandler] KB item ID '{kb_id}' has empty document content. Skipping analysis.")
+               return
+
+           # 2. Perform Keyword Extraction using an LLM agent
+           # Select ContentAnalysisAgent itself or DocProcessor (which uses a powerful model)
+           analysis_llm_agent_name = "ContentAnalysisAgent" # Could also be "DocProcessor"
+           keyword_agent = next((a for a in self.agents if a.name == analysis_llm_agent_name), None)
+
+           if not keyword_agent:
+               print(f"[ContentAnalysisHandler] Agent '{analysis_llm_agent_name}' not found for keyword extraction. Skipping.")
+               return
+
+           # Prepare content excerpt for LLM (e.g., first 15k chars)
+           content_excerpt = document_content[:15000]
+           keyword_prompt = (
+               f"Extract up to 5-7 most relevant keywords or key phrases from the following text. "
+               f"Return them as a comma-separated list. If no distinct keywords are found, return 'NONE'.\n\n"
+               f"Text to analyze:\n---\n{content_excerpt}\n---\nKeywords:"
+           )
+
+           print(f"[ContentAnalysisHandler] Requesting keyword extraction for kb_id: {kb_id} using {keyword_agent.name}...")
+           keyword_result = await self.execute_agent(keyword_agent, keyword_prompt)
+
+           if keyword_result.get("status") == "success" and keyword_result.get("response", "").strip():
+               extracted_keywords_str = keyword_result.get("response").strip()
+               if extracted_keywords_str.upper() == "NONE":
+                   print(f"[ContentAnalysisHandler] LLM reported no distinct keywords for kb_id: {kb_id}.")
+                   return # Or store metadata indicating "no_keywords_found"
+
+               # For now, we assume keywords are comma-separated. Future: parse list if LLM returns JSON list.
+               # keywords_list = [kw.strip() for kw in extracted_keywords_str.split(',') if kw.strip()]
+
+               print(f"[ContentAnalysisHandler] Successfully extracted keywords for kb_id: {kb_id}: '{extracted_keywords_str}'")
+
+               # 3. Update KB item metadata with keywords
+               new_metadata = {
+                   "extracted_keywords": extracted_keywords_str, # Store as comma-separated string for simplicity
+                   "keywords_extracted_by": keyword_agent.name,
+                   "keywords_model_used": keyword_agent.model,
+                   "keyword_extraction_timestamp_iso": datetime.datetime.now().isoformat()
+               }
+
+               update_status = await self._update_kb_item_metadata(kb_id, new_metadata)
+               if update_status.get("status") == "success":
+                   print(f"[ContentAnalysisHandler] Successfully updated metadata for kb_id: {kb_id} with keywords.")
+               else:
+                   print(f"[ContentAnalysisHandler] Failed to update metadata for kb_id: {kb_id}. Error: {update_status.get('message')}")
+           else:
+               print(f"[ContentAnalysisHandler] Keyword extraction failed for kb_id: {kb_id}. LLM Response: {keyword_result.get('response')}")
+
+       except Exception as e:
+           print(f"ERROR [ContentAnalysisHandler] Failed to process new KB content for kb_id '{kb_id}'. Error: {e}")
+
 
    async def publish_message(self, message_type: str, source_agent_name: str, payload: Dict) -> str:
        # """ (Method Docstring as Comment)
@@ -851,6 +953,62 @@ class TerminusOrchestrator:
        except Exception as e:
            print(f"ERROR: Failed to retrieve knowledge: {e}")
            return {"status": "error", "message": f"Failed to retrieve knowledge: {str(e)}", "results": []}
+
+   async def _update_kb_item_metadata(self, kb_id: str, new_metadata_fields: Dict) -> Dict:
+       # """ (Method Docstring as Comment)
+       # Updates the metadata of an existing item in the Knowledge Base.
+       # Args:
+       #     kb_id: The unique ID of the KB item to update.
+       #     new_metadata_fields: A dictionary containing new metadata fields to add or existing fields to overwrite.
+       # Returns:
+       #     A dictionary with status and a message.
+       # """
+       if self.knowledge_collection is None:
+           return {"status": "error", "message": "Knowledge base not initialized."}
+       if not kb_id or not isinstance(kb_id, str):
+           return {"status": "error", "message": "Valid kb_id (string) is required."}
+       if not new_metadata_fields or not isinstance(new_metadata_fields, dict): # Check if it's a non-empty dict
+           return {"status": "error", "message": "new_metadata_fields must be a non-empty dictionary."}
+
+       try:
+           # Retrieve the existing item to get its current metadata and document
+           # Note: ChromaDB get() can be slow if used excessively for checks before update.
+           # However, it's necessary if we need to merge metadata and ensure document is passed.
+           existing_item = self.knowledge_collection.get(ids=[kb_id], include=["metadatas", "documents"])
+
+           if not existing_item or not existing_item.get('ids') or not existing_item['ids'][0]:
+               return {"status": "error", "message": f"KB item with ID '{kb_id}' not found for update."}
+
+           # existing_item['metadatas'] is a list, existing_item['documents'] is a list.
+           current_metadata = existing_item['metadatas'][0] if existing_item['metadatas'] and existing_item['metadatas'][0] is not None else {}
+           retrieved_document = existing_item['documents'][0] if existing_item['documents'] and existing_item['documents'][0] is not None else None
+
+           if retrieved_document is None:
+                # This state should ideally not occur if an ID exists, implies data inconsistency.
+                return {"status": "error", "message": f"Document content for KB item ID '{kb_id}' is missing, cannot update metadata reliably."}
+
+           # Merge new metadata fields into current metadata
+           updated_metadata = current_metadata.copy() # Start with existing metadata
+
+           # Clean and add/update fields from new_metadata_fields
+           for k, v in new_metadata_fields.items():
+               if isinstance(v, (str, int, float, bool)):
+                   updated_metadata[k] = v
+               else:
+                   updated_metadata[k] = str(v) # Convert other types to string
+                   print(f"Warning (KB Update): Metadata value for key '{k}' for ID '{kb_id}' was converted to string. Original type: {type(v)}")
+
+           self.knowledge_collection.update(
+               ids=[kb_id],
+               metadatas=[updated_metadata], # Pass the full, merged and cleaned metadata
+               documents=[retrieved_document] # ChromaDB update often requires documents even if not changing them
+           )
+           print(f"Orchestrator: Successfully updated metadata for KB item ID '{kb_id}'. Added/updated fields: {new_metadata_fields}")
+           return {"status": "success", "id": kb_id, "message": f"Metadata updated for KB item ID '{kb_id}'."}
+
+       except Exception as e:
+           print(f"ERROR (KB Update): Failed to update metadata for KB item ID '{kb_id}': {e}")
+           return {"status": "error", "message": f"Failed to update metadata for KB item ID '{kb_id}': {str(e)}"}
 
    def get_conversation_history_for_display(self) -> List[Dict]:
        # Returns a copy of the conversation history.
@@ -2826,11 +2984,28 @@ def main():
                                content=excerpt_to_store,
                                metadata=doc_metadata
                                # content_id=content_id_for_kb # Let store_knowledge generate ID
-                           ))
-                           if kb_store_result.get("status") == "success":
-                               st.success(f"Document excerpt stored in knowledge base (ID: {kb_store_result.get('id')}).")
-                           else:
-                               st.error(f"Failed to store document excerpt in knowledge base: {kb_store_result.get('message')}")
+                           ) # This is the actual coroutine object from store_knowledge
+
+                           # Define an async wrapper to await storage then publish message
+                           async def store_and_publish_doc_excerpt(task_to_await): # Renamed arg for clarity
+                               kb_store_result = await task_to_await # Await the passed task (coroutine)
+                               if kb_store_result.get("status") == "success":
+                                   st.success(f"Document excerpt stored in knowledge base (ID: {kb_store_result.get('id')}).")
+                                   # Publish event
+                                   await orchestrator.publish_message(
+                                       message_type="kb.document_excerpt.added",
+                                       source_agent_name="DocumentProcessorUI",
+                                       payload={
+                                           "kb_id": kb_store_result.get("id"),
+                                           "filename": file.name,
+                                           "filetype": file.type if file.type else "unknown"
+                                       }
+                                   )
+                               else:
+                                   st.error(f"Failed to store document excerpt in knowledge base: {kb_store_result.get('message')}")
+
+                           # Run the wrapper using asyncio.run, passing the store_knowledge coroutine
+                           asyncio.run(store_and_publish_doc_excerpt(kb_store_task_obj)) # kb_store_task_obj is the coroutine
 
                            # 2. Proceed with AI analysis (existing logic)
                            prompt=f"Analyze this document content: {content[:2000]}" # content is already defined
