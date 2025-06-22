@@ -444,13 +444,26 @@ class TerminusOrchestrator:
            "data_analysis", "web_search", "document_processing", "general_question_answering",
            "complex_task_planning"
        ]
+       self.intent_classifier = None
+       self.ner_pipeline = None
+       self.ner_model_name = "dslim/bert-base-NER"
+
        try:
            print(f"Initializing Zero-Shot Intent Classifier ({self.intent_classifier_model})...")
            self.intent_classifier = hf_pipeline("zero-shot-classification", model=self.intent_classifier_model, device=self.device)
            print("Intent Classifier initialized.")
        except Exception as e:
            print(f"WARNING: Failed to initialize Zero-Shot Intent Classifier: {e}. Intent classification will be unavailable.")
-           self.intent_classifier = None
+           # self.intent_classifier remains None
+
+       try:
+           print(f"Initializing NER Pipeline ({self.ner_model_name})...")
+           # Using aggregation_strategy to group token pieces into single entities
+           self.ner_pipeline = hf_pipeline("ner", model=self.ner_model_name, tokenizer=self.ner_model_name, device=self.device, aggregation_strategy="simple")
+           print("NER Pipeline initialized.")
+       except Exception as e:
+           print(f"WARNING: Failed to initialize NER Pipeline: {e}. Entity recognition will be unavailable.")
+           # self.ner_pipeline remains None
 
        self.conversation_history = []
        self.max_history_items = 6 # e.g., 3 user + 3 assistant turns
@@ -1594,24 +1607,93 @@ class TerminusOrchestrator:
        return {"consensus_score":consensus_score,"best_response":best_response,"summary":f"Processed by {len(responses)} of {len(results)} initially tasked agents."}
 
    async def classify_user_intent(self, user_prompt: str) -> Dict:
-       if not self.intent_classifier:
-           return {"status": "error", "message": "Intent classifier not available.", "intent": None, "scores": None}
+       # Initialize return structure
+       nlu_results = {
+           "status": "error",
+           "message": "NLU processing did not complete.",
+           "intent": None,
+           "intent_scores": None,
+           "entities": [], # Default to empty list
+           "raw_intent_result": None,
+           "raw_ner_result": None
+       }
+
        if not user_prompt.strip():
-           return {"status": "error", "message": "Prompt is empty, cannot classify intent.", "intent": None, "scores": None}
+           nlu_results["message"] = "Prompt is empty, cannot process NLU."
+           return nlu_results
 
-       try:
-           print(f"Classifying intent for prompt: '{user_prompt[:100]}...'")
-           classification_result = self.intent_classifier(user_prompt, self.candidate_intent_labels, multi_label=True)
+       # 1. Intent Classification (existing logic)
+       if not self.intent_classifier:
+           nlu_results["message"] = "Intent classifier not available."
+           # We might still proceed to NER if NER is available
+       else:
+           try:
+               print(f"NLU: Classifying intent for prompt: '{user_prompt[:100]}...'")
+               classification_result = self.intent_classifier(user_prompt, self.candidate_intent_labels, multi_label=True)
+               nlu_results["intent"] = classification_result['labels'][0]
+               nlu_results["intent_scores"] = {label: score for label, score in zip(classification_result['labels'], classification_result['scores'])}
+               nlu_results["raw_intent_result"] = classification_result
+               nlu_results["status"] = "success" # Mark as success if at least intent classification worked
+               nlu_results["message"] = "Intent classification successful."
+               print(f"NLU: Top identified intent: {nlu_results['intent']} (Score: {nlu_results['intent_scores'][nlu_results['intent']]:.4f})")
+           except Exception as e:
+               print(f"ERROR: Intent classification failed: {str(e)}")
+               nlu_results["message"] = f"Intent classification failed: {str(e)}"
+               # Status remains 'error' if this was the only NLU step or if NER also fails
 
-           top_intent = classification_result['labels'][0]
-           scores_dict = {label: score for label, score in zip(classification_result['labels'], classification_result['scores'])}
+       # 2. Named Entity Recognition (NER)
+       if not self.ner_pipeline:
+           ner_message = "NER pipeline not available."
+           if nlu_results["status"] == "success": # If intent worked, this is just a partial failure
+               nlu_results["message"] += f" {ner_message}"
+           else: # If intent also failed
+               nlu_results["message"] = f"{nlu_results['message']} {ner_message}"
+           print(f"WARNING: {ner_message}")
+       else:
+           try:
+               print(f"NLU: Performing NER on prompt: '{user_prompt[:100]}...'")
+               ner_output = self.ner_pipeline(user_prompt)
+               nlu_results["raw_ner_result"] = ner_output
 
-           print(f"Top identified intent: {top_intent} (Score: {scores_dict[top_intent]:.4f})")
-           return {"status": "success", "intent": top_intent, "all_scores": scores_dict, "raw_result": classification_result}
+               processed_entities = []
+               if ner_output: # ner_output is a list of dicts
+                   for entity in ner_output:
+                       processed_entities.append({
+                           "text": entity.get('word'),
+                           "type": entity.get('entity_group'), # Using 'entity_group' as per newer pipeline outputs
+                           "score": round(entity.get('score'), 4) if isinstance(entity.get('score'), float) else None,
+                           "start": entity.get('start'),
+                           "end": entity.get('end')
+                       })
+               nlu_results["entities"] = processed_entities
+               ner_success_message = f"NER successful, found {len(processed_entities)} entities."
+               print(f"NLU: {ner_success_message}")
+               if nlu_results["status"] == "success":
+                   nlu_results["message"] += f" {ner_success_message}"
+               else: # If intent failed but NER worked
+                   nlu_results["message"] = ner_success_message
+                   nlu_results["status"] = "success" # Mark overall as success if NER worked
+           except Exception as e:
+               ner_error_message = f"NER processing failed: {str(e)}"
+               print(f"ERROR: {ner_error_message}")
+               if nlu_results["status"] == "success": # If intent worked but NER failed
+                   nlu_results["message"] += f" {ner_error_message}"
+                   # Status remains success from intent part, but entities will be empty.
+               else: # Both failed
+                   nlu_results["message"] = f"{nlu_results['message']} {ner_error_message}"
 
-       except Exception as e:
-           print(f"ERROR: Intent classification failed: {str(e)}")
-           return {"status": "error", "message": f"Intent classification failed: {str(e)}", "intent": None, "scores": None}
+       # Final check on overall status
+       if nlu_results["intent"] is None and not nlu_results["entities"]:
+           # If neither intent nor entities could be processed and status is still error
+           if nlu_results["status"] == "error" and nlu_results["message"] == "NLU processing did not complete.":
+                nlu_results["message"] = "Both Intent Classification and NER are unavailable or failed."
+       elif nlu_results["status"] == "error" and (nlu_results["intent"] is not None or nlu_results["entities"]):
+            # This case should not happen if logic above is correct, but as a safeguard
+            nlu_results["status"] = "partial_success"
+            nlu_results["message"] = "NLU processing partially succeeded."
+
+
+       return nlu_results
 
    async def execute_master_plan(self, user_prompt: str) -> List[Dict]:
        print(f"MasterPlanner received user prompt: '{user_prompt[:100]}...'")
@@ -1686,10 +1768,12 @@ class TerminusOrchestrator:
 
                    kb_query_generation_prompt = (
                        f"{kb_query_context_for_prompt}"
-                       f"Current User Request: '{user_prompt}'\n\n"
+                       f"Current User Request: '{user_prompt}'\n"
+                       f"NLU Analysis of Request: {first_attempt_intent_info}\n\n" # Explicitly include NLU output
                        f"Your task is to determine if retrieving information from a knowledge base would be beneficial for planning a response to the current user request. "
                        f"The knowledge base contains summaries, processed documents, and key facts from previous interactions.\n"
                        f"If retrieving information would be helpful, formulate a concise and effective search query string (max 5-7 words if possible) that can be used to search the knowledge base. "
+                       f"Consider using identified entities from the NLU Analysis (if any) in your query for better relevance.\n"
                        f"The query should aim to find the most relevant context or previously discussed details.\n"
                        f"If you believe no specific information retrieval from the knowledge base is necessary for this particular request, output the exact string: NO_QUERY_NEEDED\n\n"
                        f"Output ONLY the search query string OR the 'NO_QUERY_NEEDED' marker. Do not include any other explanations or text.\n\n"
@@ -1729,13 +1813,28 @@ class TerminusOrchestrator:
                else:
                    print("MasterPlanner: Knowledge Base not available, skipping preliminary query.")
 
-               # --- Step 2: Intent Classification (existing logic) ---
-               classified_intent_result = await self.classify_user_intent(user_prompt)
-               if classified_intent_result and classified_intent_result.get("status") == "success":
-                   top_intent = classified_intent_result.get("intent")
-                   top_score = classified_intent_result.get("all_scores", {}).get(top_intent, 0)
-                   if top_score > 0.7: # Confidence threshold
-                       first_attempt_intent_info = f"Pre-classified user intent: '{top_intent}' (Confidence: {top_score:.2f}). Please consider this primary intent."
+               # --- Step 2: Intent Classification & Entity Recognition (Now combined) ---
+               nlu_output = await self.classify_user_intent(user_prompt) # This now returns intent and entities
+
+               intent_str_part = "N/A"
+               if nlu_output.get("intent"):
+                   top_intent = nlu_output.get("intent")
+                   intent_scores = nlu_output.get("intent_scores", {})
+                   top_score = intent_scores.get(top_intent, 0)
+                   if top_score > 0.7: # Confidence threshold for displaying intent
+                       intent_str_part = f"'{top_intent}' (Confidence: {top_score:.2f})"
+                   else:
+                       intent_str_part = f"'{top_intent}' (Low Confidence: {top_score:.2f})"
+
+               entities_str_part = "None detected."
+               if nlu_output.get("entities"):
+                   entity_strs = [f"{e.get('type', 'UNK')}: '{e.get('text', '')}' ({e.get('score', 0.0):.2f})" for e in nlu_output["entities"]]
+                   if entity_strs:
+                       entities_str_part = "; ".join(entity_strs)
+
+               first_attempt_intent_info = f"NLU Analysis :: Intent: {intent_str_part} :: Entities: [{entities_str_part}]. Consider this for planning."
+               print(f"MasterPlanner: {first_attempt_intent_info}")
+
 
                # Keyword-based history selection for the first attempt's prompt
                current_prompt_lower = user_prompt.lower()
@@ -1778,10 +1877,10 @@ class TerminusOrchestrator:
                    f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents.\n\n"
                    f"{history_context_for_prompt}" # Use keyword-selected history
                    f"{kb_context_section_for_main_prompt}" # Add KB context here
-                   f"Analyze the following CURRENT user request: '{user_prompt}'\n\n"
-                   f"{first_attempt_intent_info}\n\n" # Intent info also from first attempt
+                   f"Analyze the following CURRENT user request: '{user_prompt}'\n"
+                   f"NLU Analysis of Request: {first_attempt_intent_info}\n\n" # NLU analysis (intent & entities) explicitly provided
                    f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
-                   f"Based on the user request, conversation history, and any provided knowledge base information, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
+                   f"Based on the user request, conversation history, any provided knowledge base information, and especially the NLU Analysis (intent and entities), create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
                    f"  - 'step_id': (Integer or String) A unique sequential identifier for the step (e.g., 1, 2, '2a').\n"
                    f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above), OR the special value 'parallel_group'.\n"
                    f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent. (Not used if agent_name is 'parallel_group').\n"
