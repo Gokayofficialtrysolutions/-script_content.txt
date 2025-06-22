@@ -380,6 +380,11 @@ import platform # For OS info
 from tools.auto_dev import auto_dev # Added for project scaffolding
 # streamlit and pandas are not directly used here but in the UI script that imports this.
 
+# ChromaDB for Knowledge Base
+import chromadb
+from chromadb.utils import embedding_functions # For default embedding function
+import uuid # For generating unique IDs for knowledge entries
+
 @dataclass
 class Agent:
    name:str;model:str;specialty:str;active:bool=True
@@ -387,7 +392,8 @@ class Agent:
 class TerminusOrchestrator:
    def __init__(self):
        self.agents = []
-       agents_file_path = Path(__file__).parent.parent / "agents.json"
+       base_install_dir = Path(__file__).parent.parent # Assuming master_orchestrator.py is in $INSTALL_DIR/agents/
+       agents_file_path = base_install_dir / "agents.json"
        try:
            with open(agents_file_path, 'r') as f:
                agents_data = json.load(f)
@@ -448,6 +454,144 @@ class TerminusOrchestrator:
 
        self.conversation_history = []
        self.max_history_items = 6 # e.g., 3 user + 3 assistant turns
+
+       # Knowledge Base Setup (ChromaDB)
+       self.knowledge_collection = None
+       try:
+           chroma_db_path = str(base_install_dir / "data" / "vector_store")
+           # Ensure the parent directory exists for ChromaDB, as PersistentClient might not create it.
+           Path(chroma_db_path).parent.mkdir(parents=True, exist_ok=True)
+
+           self.chroma_client = chromadb.PersistentClient(path=chroma_db_path)
+
+           # Using a default SentenceTransformer embedding function from chromadb.utils
+           # This requires sentence-transformers to be installed.
+           default_ef = embedding_functions.SentenceTransformerEmbeddingFunction()
+
+           self.knowledge_collection_name = "terminus_knowledge_v1"
+           self.knowledge_collection = self.chroma_client.get_or_create_collection(
+               name=self.knowledge_collection_name,
+               embedding_function=default_ef # Assign the embedding function here
+           )
+           print(f"Knowledge base initialized. Collection '{self.knowledge_collection_name}' loaded/created at {chroma_db_path}.")
+           # Test add - TODO remove later or make conditional
+           # self.knowledge_collection.add(documents=["Test document"], metadatas=[{"source":"init"}], ids=["init_test_id_123"])
+           # print(f"Knowledge base count: {self.knowledge_collection.count()}")
+
+       except Exception as e:
+           print(f"CRITICAL ERROR: Failed to initialize ChromaDB knowledge base: {e}")
+           print("Knowledge base functionalities will be unavailable.")
+           # self.knowledge_collection will remain None, methods should check for this.
+
+   async def store_knowledge(self, content: str, metadata: Optional[Dict] = None, content_id: Optional[str] = None) -> Dict:
+       if self.knowledge_collection is None:
+           return {"status": "error", "message": "Knowledge base not initialized."}
+
+       if not content or not isinstance(content, str):
+           return {"status": "error", "message": "Content must be a non-empty string."}
+
+       try:
+           # Ensure content_id is a string; generate if not provided or not a string
+           final_content_id = content_id
+           if not final_content_id or not isinstance(final_content_id, str):
+               final_content_id = str(uuid.uuid4())
+
+           # Clean metadata: ChromaDB expects values to be str, int, float, or bool.
+           cleaned_metadata = {}
+           if metadata:
+               if not isinstance(metadata, dict):
+                   print(f"Warning: Metadata provided was not a dict, ignoring. Type: {type(metadata)}")
+               else:
+                   for k, v in metadata.items():
+                       if isinstance(v, (str, int, float, bool)):
+                           cleaned_metadata[k] = v
+                       else:
+                           # Attempt to convert other types to string, or log/skip
+                           cleaned_metadata[k] = str(v)
+                           print(f"Warning: Metadata value for key '{k}' was converted to string. Original type: {type(v)}")
+
+           # ChromaDB's add expects lists for documents, metadatas, and ids.
+           self.knowledge_collection.add(
+               documents=[content],
+               metadatas=[cleaned_metadata] if cleaned_metadata else [None], # Pass [None] if metadata is empty after cleaning
+               ids=[final_content_id]
+           )
+           # print(f"Stored knowledge with ID: {final_content_id}, metadata: {cleaned_metadata}, count: {self.knowledge_collection.count()}")
+           return {"status": "success", "id": final_content_id, "message": f"Content stored with ID: {final_content_id}."}
+
+       except chromadb.errors.IDAlreadyExistsError:
+           # Option 1: Update existing entry (if desired, requires .update method and careful handling)
+           # Option 2: Return an error indicating ID conflict
+           print(f"Error: Knowledge item with ID '{final_content_id}' already exists.")
+           return {"status": "error", "id": final_content_id, "message": f"Knowledge item with ID '{final_content_id}' already exists."}
+       except Exception as e:
+           print(f"ERROR: Failed to store knowledge: {e}")
+           # Consider more specific error types if ChromaDB raises them
+           return {"status": "error", "message": f"Failed to store knowledge: {str(e)}"}
+
+   async def retrieve_knowledge(self, query_text: str, n_results: int = 5, filter_metadata: Optional[Dict] = None) -> Dict:
+       if self.knowledge_collection is None:
+           return {"status": "error", "message": "Knowledge base not initialized.", "results": []}
+
+       if not query_text or not isinstance(query_text, str):
+           return {"status": "error", "message": "Query text must be a non-empty string.", "results": []}
+
+       if not isinstance(n_results, int) or n_results <= 0:
+           print(f"Warning: Invalid n_results value ({n_results}), defaulting to 5.")
+           n_results = 5
+
+       try:
+           # Metadata filtering (where clause)
+           # ChromaDB's where clause can be complex. For now, we'll assume filter_metadata is a simple dict for exact matches.
+           # More complex filters like {"$and": [...], "$or": [...]} or operators like {"$gt": value} would require
+           # more sophisticated parsing or direct passing if the user forms it correctly.
+           # For this initial implementation, we'll keep it simple. If filter_metadata is provided,
+           # we'll assume it's for direct equality checks.
+
+           # Ensure filter_metadata keys are strings and values are simple types if provided.
+           cleaned_filter_metadata = None
+           if filter_metadata:
+               if not isinstance(filter_metadata, dict):
+                   print(f"Warning: filter_metadata provided was not a dict, ignoring. Type: {type(filter_metadata)}")
+               else:
+                   cleaned_filter_metadata = {}
+                   for k, v in filter_metadata.items():
+                       if isinstance(v, (str, int, float, bool)):
+                           cleaned_filter_metadata[k] = v
+                       else:
+                           print(f"Warning: Value for filter_metadata key '{k}' is not a simple type, skipping this filter condition. Type: {type(v)}")
+                   if not cleaned_filter_metadata: # If all items were invalid
+                       cleaned_filter_metadata = None
+
+           query_results = self.knowledge_collection.query(
+               query_texts=[query_text],
+               n_results=n_results,
+               where=cleaned_filter_metadata # Pass None if no valid filter
+           )
+
+           # Process results into a more usable format
+           # query_results is a dict with keys like 'ids', 'documents', 'metadatas', 'distances'
+           # Each value is a list of lists (one inner list per query_text, here only one)
+           results_list = []
+           if query_results and query_results.get('ids') and query_results.get('ids')[0]:
+               ids = query_results['ids'][0]
+               documents = query_results.get('documents', [[]])[0]
+               metadatas = query_results.get('metadatas', [[]])[0]
+               distances = query_results.get('distances', [[]])[0] # Lower distance is better
+
+               for i in range(len(ids)):
+                   results_list.append({
+                       "id": ids[i],
+                       "document": documents[i] if i < len(documents) else None,
+                       "metadata": metadatas[i] if i < len(metadatas) else None,
+                       "distance": distances[i] if i < len(distances) else None
+                   })
+
+           return {"status": "success", "results": results_list, "message": f"Retrieved {len(results_list)} results."}
+
+       except Exception as e:
+           print(f"ERROR: Failed to retrieve knowledge: {e}")
+           return {"status": "error", "message": f"Failed to retrieve knowledge: {str(e)}", "results": []}
 
    def get_conversation_history_for_display(self) -> List[Dict]:
        # Returns a copy of the conversation history.
@@ -1592,7 +1736,7 @@ EOF
 create_terminus_ui_script() {
     progress "CREATING TERMINUS UI SCRIPT"
     cat>"$INSTALL_DIR/terminus_ui.py"<<'EOF'
-import streamlit as st,asyncio,json,os,subprocess,time # Ensure time is imported
+import streamlit as st,asyncio,json,os,subprocess,time,datetime # Ensure time and datetime are imported
 from pathlib import Path # Path is used for temp_video_path
 import pandas as pd,plotly.express as px,plotly.graph_objects as go
 from agents.master_orchestrator import orchestrator,doc_processor,web_intel
@@ -1757,10 +1901,36 @@ def main():
                    st.text_area("Content Preview",content[:1000]+"..." if len(content)>1000 else content,height=200)
 
                    if st.button(f"Analyze with AI",key=f"analyze_{file.name}"):
-                       prompt=f"Analyze this document content: {content[:2000]}"
-                       results=asyncio.run(orchestrator.parallel_execution(prompt,selected_agents[:3]))
-                       for result in results:
-                           st.info(f"**{result['agent']}**: {result['response'][:500]}...")
+                       with st.spinner("Storing document excerpt and analyzing..."):
+                           # 1. Store an excerpt in the knowledge base
+                           excerpt_to_store = content[:2000] # Using the same length as analysis prompt for consistency
+                           doc_metadata = {
+                               "source": "document_upload",
+                               "filename": file.name,
+                               "filetype": file.type if file.type else "unknown",
+                               "processed_timestamp": datetime.datetime.now().isoformat()
+                           }
+                           # Generate a unique ID for this document content to avoid collision if re-uploaded/re-analyzed
+                           # A simple approach: combine filename and a timestamp of processing.
+                           # More robust: hash the content, but that's more involved for this step.
+                           # For now, let uuid handle uniqueness if not specified.
+                           # content_id_for_kb = f"doc_{file.name}_{int(time.time())}"
+
+                           kb_store_result = asyncio.run(orchestrator.store_knowledge(
+                               content=excerpt_to_store,
+                               metadata=doc_metadata
+                               # content_id=content_id_for_kb # Let store_knowledge generate ID
+                           ))
+                           if kb_store_result.get("status") == "success":
+                               st.success(f"Document excerpt stored in knowledge base (ID: {kb_store_result.get('id')}).")
+                           else:
+                               st.error(f"Failed to store document excerpt in knowledge base: {kb_store_result.get('message')}")
+
+                           # 2. Proceed with AI analysis (existing logic)
+                           prompt=f"Analyze this document content: {content[:2000]}" # content is already defined
+                           results=asyncio.run(orchestrator.parallel_execution(prompt,selected_agents[:3])) # Use selected_agents from sidebar
+                           for result in results:
+                               st.info(f"**{result['agent']}**: {result['response'][:500]}...")
 
    elif operation_mode=="Web Intelligence":
        st.subheader("WEB INTELLIGENCE NEXUS")
