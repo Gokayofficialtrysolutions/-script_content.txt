@@ -139,6 +139,51 @@ This document summarizes the major phases, key features implemented, and signifi
     *   **`explain_code_snippet` Enhanced:** After successful explanation, stores the snippet and explanation in KB with metadata.
     *   **`generate_code_module` Enhanced:** After successful code generation, stores requirements and generated code in KB with metadata.
 
+## Phase 12: Inter-Agent Message Bus & Reactive KB Content Analysis
+*   **Objective:** Implement a basic message bus for inter-agent communication and use it to trigger reactive analysis of new KB content.
+*   **Key Features & Changes:**
+    *   **Message Bus Implementation (`TerminusOrchestrator`):**
+        *   Added `self.message_bus_subscribers` (dictionary for message type to handler list).
+        *   Implemented `publish_message` (creates message, dispatches to async handlers or queues).
+        *   Implemented `subscribe_to_message` (registers handlers).
+    *   **Event Publishing:** Key methods like `store_knowledge` (after successful KB write by WebCrawler, CodeMaster, DocProcessor) and `execute_master_plan` (for plan logs) now publish events (e.g., `"kb.webcontent.added"`, `"kb.plan_log.added"`).
+    *   **`ContentAnalysisAgent` & Keyword Extraction:**
+        *   Defined `ContentAnalysisAgent` in `agents.json`.
+        *   Implemented `_handle_new_kb_content_for_analysis` subscriber in `TerminusOrchestrator`.
+        *   This handler receives `kb.*.added` messages, retrieves the KB item.
+        *   Calls an LLM (`ContentAnalysisAgent`) to extract keywords from the content.
+        *   Uses `_update_kb_item_metadata` to add `extracted_keywords` to the KB item.
+
+## Phase 13: MasterPlanner Semantic Enhancement & User Feedback System
+*   **Objective:** Enhance MasterPlanner's contextual understanding using KB keywords and implement a comprehensive user feedback system.
+*   **Key Features & Changes:**
+    *   **MasterPlanner Keyword Utilization:**
+        *   Modified `execute_master_plan` to include `extracted_keywords` (if present in retrieved KB items' metadata) in the context provided to the main planning LLM.
+        *   Updated MasterPlanner prompt to instruct it to leverage these keywords.
+        *   Refined KB query for plan logs to include NLU entities from the user request.
+    *   **User Feedback Mechanism:**
+        *   Defined feedback data structure (`feedback_id`, `item_id`, `item_type`, `rating`, `comment`, etc.).
+        *   Implemented `TerminusOrchestrator.store_user_feedback` to log feedback to `$LOG_DIR/feedback_log.jsonl` and publish a `"user.feedback.submitted"` message.
+        *   **UI Integration (`terminus_ui.py`):** Added feedback widgets (👍/👎, comment) to:
+            *   Knowledge Base Explorer results.
+            *   Individual agent responses in Multi-Agent Chat.
+            *   MasterPlanner outcome summaries (linking `item_id` to `plan_log_kb_id`).
+
+## Phase 14: Feedback Analysis & Reporting to Knowledge Base
+*   **Objective:** Enable the system to analyze collected user feedback and store a summary report in the Knowledge Base.
+*   **Key Features & Changes:**
+    *   **`feedback_analyzer.py` Script:**
+        *   Created a standalone Python script (`$TOOLS_DIR/feedback_analyzer.py`).
+        *   Reads `$LOG_DIR/feedback_log.jsonl`, aggregates statistics (sentiment, counts, etc.), and prints a JSON summary report.
+        *   Handles empty or malformed log entries gracefully.
+    *   **Orchestrator Integration (`generate_and_store_feedback_report`):**
+        *   New async method in `TerminusOrchestrator`.
+        *   Executes `feedback_analyzer.py` as a subprocess, captures its JSON output.
+        *   Constructs metadata and calls `store_knowledge` to save the report string to KB.
+        *   Publishes a `"kb.feedback_report.added"` event.
+    *   **UI Trigger:** Added a button in "System Information" UI to run `generate_and_store_feedback_report` and display confirmation/path to report.
+    *   **Refactor (Concurrent):** Centralized path definitions and key configurations in `TerminusOrchestrator.__init__` and updated all methods to use these attributes.
+
 ## Ongoing Challenges & Notes
 *   **Dependency Version Lookup:** (Resolved) The concern about placeholder dependencies in `README.md` has been addressed; all dependencies in `*_requirements.txt` are now pinned. The `passlib` specific issue was also resolved to `passlib==1.7.4`.
 *   **Subtask Reporting Inconsistencies:** (Historical Note) Throughout development, there were several instances where subtask execution reports did not align with the requested task, requiring manual verification or re-runs. This complicated progress tracking. (This note remains for historical context of the overall project development if it refers to agent's interaction with a human, not specific to this session's automated tasks).

@@ -33,6 +33,10 @@
 *   [X] Knowledge Base: Automated augmentation by WebCrawler (stores summaries of scraped pages).
 *   [X] Knowledge Base: Automated augmentation by CodeMaster (stores code explanations and generated modules).
 *   [X] Knowledge Base: `MasterPlanner` now performs a preliminary KB query to fetch relevant context before generating a plan.
+*   [X] MasterPlanner: Leverages extracted keywords from KB items (when available) to improve contextual understanding during planning.
+*   [X] Inter-Agent Communication: Basic asynchronous message bus implemented.
+*   [X] Knowledge Base: Automated content analysis (keyword extraction) for new KB items via message bus.
+*   [X] User Feedback: System can analyze collected feedback and store a summary report in the Knowledge Base.
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
@@ -54,20 +58,23 @@
 *   [X] **Persistent & Adaptive Knowledge Base:** (Core implemented)
     *   [X] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations) - *ChromaDB backend, store/retrieve methods, UI explorer implemented. Initial data types: doc excerpts, web summaries, code explanations/generations, plan execution logs.*
     *   [ ] Hybrid DB approach (vector + graph) - *Currently vector-only.*
-*   [X] **Comprehensive User Feedback Loop & Reinforcement Learning:** (Initial feedback collection implemented)
+*   [X] **Comprehensive User Feedback Loop & Reinforcement Learning:** (Initial feedback collection & analysis implemented)
     *   [X] Explicit user feedback mechanisms (ratings, corrections) - *UI widgets for feedback (positive/negative/comment) added to key AGI outputs. Feedback is logged to a file and an event is published on the message bus.*
+    *   [X] System analyzes feedback to generate summary reports, stored in KB.
     *   [ ] RL frameworks for adjusting behavior, prompts, tool selection
-*   [X] **Knowledge Ingestion & Synthesis:** (Basic agent-driven ingestion implemented)
+*   [X] **Knowledge Ingestion & Synthesis:** (Basic agent-driven ingestion & reactive analysis implemented)
     *   [X] Autonomous ingestion from documents/links - *WebCrawler and DocumentProcessor (via UI) now store processed content/summaries in KB. CodeMaster stores explanations/generations.*
-    *   [ ] Summarization & indexing of ingested data - *Basic summarization before storage for WebCrawler; indexing is inherent to ChromaDB.*
+    *   [X] Reactive analysis of new KB content (e.g., keyword extraction) triggered via message bus.
+    *   [ ] Summarization & indexing of ingested data - *Basic summarization before storage for WebCrawler; indexing is inherent to ChromaDB. Keyword extraction enhances discoverability.*
 
 ### Phase Z: Expanded Autonomy & Collaborative Intelligence
 *Key Objectives:*
 *   [ ] **Advanced Tool Discovery & Augmentation:**
     *   [ ] Dynamically discover, evaluate, learn new tools/APIs
     *   [ ] Agents request/suggest new tool integrations
-*   [X] **Sophisticated Inter-Agent Communication & Collaboration:** (Initial foundation laid)
+*   [X] **Sophisticated Inter-Agent Communication & Collaboration:** (Initial foundation laid & first use case)
     *   [X] Basic asynchronous message bus implemented, enabling event broadcasting and subscription by agents/components.
+        *   *Initial use case: KB event triggers `ContentAnalysisAgent` for keyword extraction from new KB entries.*
     *   [ ] Advanced protocols for negotiation, complex info sharing, coordination
     *   [ ] Multi-agent consensus, task delegation, shared goal understanding
 *   [ ] **Proactive & Goal-Oriented Assistance:**
