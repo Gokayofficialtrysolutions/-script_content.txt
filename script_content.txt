@@ -1016,6 +1016,144 @@ class TerminusOrchestrator:
            print(f"ERROR (Feedback): Failed to store user feedback for item {item_id}. Error: {e}")
            return False
 
+   async def generate_and_store_feedback_report(self) -> Dict:
+       # """ (Method Docstring as Comment)
+       # Triggers the feedback_analyzer.py script, captures its JSON output (feedback summary report),
+       # and stores this report in the Knowledge Base.
+       # Returns:
+       #     A dictionary with status and a message, including kb_id if successful.
+       # """
+       if self.knowledge_collection is None:
+           return {"status": "error", "message": "Knowledge base not initialized. Cannot store report."}
+
+       base_install_dir = Path(__file__).parent.parent
+       analyzer_script_path = base_install_dir / "tools" / "feedback_analyzer.py"
+       log_file_path = base_install_dir / "logs" / "feedback_log.jsonl" # Default log file path
+
+       if not analyzer_script_path.exists():
+           return {"status": "error", "message": f"Feedback analyzer script not found at {analyzer_script_path}"}
+       if not log_file_path.exists():
+            # Allow analyzer to run even if log is empty/new, it will report 0 entries.
+            print(f"Info (FeedbackReport): Log file {log_file_path} not found, analyzer will process 0 entries.")
+
+
+       try:
+           print(f"Orchestrator: Running feedback_analyzer.py script from: {analyzer_script_path}")
+           # We pass the absolute path to the log file to the script
+           process = await asyncio.create_subprocess_exec(
+               sys.executable, str(analyzer_script_path), # Use sys.executable to ensure using the correct python
+               f"--log_file={str(log_file_path)}",
+               stdout=asyncio.subprocess.PIPE,
+               stderr=asyncio.subprocess.PIPE
+           )
+           stdout, stderr = await process.communicate()
+
+           if process.returncode != 0:
+               err_msg = stderr.decode().strip() if stderr else "Unknown error running feedback_analyzer.py"
+               print(f"ERROR (FeedbackReport): feedback_analyzer.py failed. STDERR: {err_msg}")
+               return {"status": "error", "message": f"Feedback analyzer script execution failed: {err_msg}"}
+
+           report_json_string = stdout.decode().strip()
+           if not report_json_string:
+               return {"status": "error", "message": "Feedback analyzer script produced no output."}
+
+           print(f"Orchestrator: Feedback analyzer script completed. Output length: {len(report_json_string)}")
+
+           try:
+               report_data = json.loads(report_json_string)
+           except json.JSONDecodeError as e:
+               print(f"ERROR (FeedbackReport): Failed to parse JSON output from feedback_analyzer.py: {e}")
+               return {"status": "error", "message": f"Failed to parse feedback analyzer output: {e}. Output: {report_json_string[:200]}..."}
+
+           # Construct metadata for KB storage
+           kb_metadata = {
+               "source": "feedback_analysis_report",
+               "report_id": report_data.get("report_id", str(uuid.uuid4())), # Use report's ID or generate new
+               "report_date_iso": report_data.get("report_generation_timestamp_iso", datetime.datetime.now().isoformat()).split('T')[0],
+               "analysis_period_start_iso": report_data.get("analysis_period_start_iso"),
+               "analysis_period_end_iso": report_data.get("analysis_period_end_iso"),
+               "total_feedback_entries": report_data.get("total_feedback_entries_processed", 0),
+               "overall_positive_ratings": report_data.get("overall_sentiment_counts", {}).get("positive", 0),
+               "overall_negative_ratings": report_data.get("overall_sentiment_counts", {}).get("negative", 0)
+           }
+           # Filter out None values from metadata to avoid issues with ChromaDB
+           kb_metadata = {k: v for k, v in kb_metadata.items() if v is not None}
+
+
+           print(f"Orchestrator: Storing feedback analysis report in Knowledge Base. Report ID: {kb_metadata['report_id']}")
+           store_result = await self.store_knowledge(
+               content=report_json_string, # Store the full JSON string as the document
+               metadata=kb_metadata
+           )
+
+           if store_result.get("status") == "success":
+               msg = f"Feedback analysis report generated and stored in KB. Report ID: {kb_metadata['report_id']}, KB ID: {store_result.get('id')}"
+               print(f"Orchestrator: {msg}")
+               # Publish event about new feedback report in KB
+               asyncio.create_task(self.publish_message(
+                    message_type="kb.feedback_report.added",
+                    source_agent_name="FeedbackAnalyzerSystem",
+                    payload={
+                        "report_id": kb_metadata['report_id'],
+                        "kb_id": store_result.get("id"),
+                        "analysis_period_start": kb_metadata.get("analysis_period_start_iso"),
+                        "analysis_period_end": kb_metadata.get("analysis_period_end_iso")
+                    }
+               ))
+               return {"status": "success", "message": msg, "kb_id": store_result.get("id"), "report_id": kb_metadata['report_id']}
+           else:
+               print(f"ERROR (FeedbackReport): Failed to store feedback analysis report in KB. Message: {store_result.get('message')}")
+               return {"status": "error", "message": f"Failed to store feedback analysis report in KB: {store_result.get('message')}"}
+
+       except Exception as e:
+           print(f"ERROR (FeedbackReport): Unexpected error in generate_and_store_feedback_report: {e}")
+           return {"status": "error", "message": f"Unexpected error generating/storing feedback report: {str(e)}"}
+
+
+   async def _update_kb_item_metadata(self, kb_id: str, new_metadata_fields: Dict) -> Dict:
+       # """ (Method Docstring as Comment)
+       # Updates the metadata of an existing item in the Knowledge Base.
+               "feedback_id": feedback_id,
+               "timestamp_iso": timestamp_iso,
+               "item_id": str(item_id), # Ensure item_id is string
+               "item_type": str(item_type),
+               "rating": str(rating),
+               "comment": comment if comment is not None else "", # Ensure comment is string or empty
+               "user_context": {
+                   "session_id": None, # Placeholder for future
+                   "operation_mode": current_mode,
+                   "related_user_prompt_preview": user_prompt_preview[:200] if user_prompt_preview else None # Truncate preview
+               }
+           }
+
+           # Define log file path relative to the orchestrator's base directory
+           base_install_dir = Path(__file__).parent.parent
+           log_dir = base_install_dir / "logs"
+           log_dir.mkdir(parents=True, exist_ok=True) # Ensure logs directory exists
+           feedback_log_file = log_dir / "feedback_log.jsonl"
+
+           with open(feedback_log_file, 'a', encoding='utf-8') as f:
+               f.write(json.dumps(feedback_data) + '\n')
+
+           print(f"[Feedback] Stored feedback ID {feedback_id} for item {item_id} (Type: {item_type}, Rating: {rating}).")
+
+           # Optionally, also publish a message to the bus about new feedback
+           # This allows other components (e.g., a future analytics agent) to be aware of new feedback.
+           asyncio.create_task(self.publish_message(
+               message_type="user.feedback.submitted",
+               source_agent_name="UserFeedbackSystem", # Or identify UI as source
+               payload={
+                   "feedback_id": feedback_id,
+                   "item_id": str(item_id),
+                   "item_type": str(item_type),
+                   "rating": str(rating)
+               }
+           ))
+           return True
+       except Exception as e:
+           print(f"ERROR (Feedback): Failed to store user feedback for item {item_id}. Error: {e}")
+           return False
+
    async def _update_kb_item_metadata(self, kb_id: str, new_metadata_fields: Dict) -> Dict:
        # """ (Method Docstring as Comment)
        # Updates the metadata of an existing item in the Knowledge Base.
@@ -3547,6 +3685,19 @@ def main():
                         st.text_area(f"Top {top_n_processes} Processes:", value=result_list[0].get("data", "No data"), height=300, disabled=True, key="top_processes_output_v3")
                     else:
                         st.error(f"Failed: {result_list[0].get('message', 'Unknown error')}" if result_list else "Execution failed")
+
+        st.markdown("---")
+        st.subheader("Feedback Analysis")
+        if st.button("📊 Generate & Store Feedback Analysis Report", key="gen_feedback_report_button"):
+            with st.spinner("Generating feedback analysis report and storing to Knowledge Base... This may take a moment."):
+                report_result = asyncio.run(orchestrator.generate_and_store_feedback_report())
+                if report_result.get("status") == "success":
+                    st.success(report_result.get("message", "Feedback report generated and stored successfully!"))
+                    if report_result.get("kb_id"):
+                        st.caption(f"Stored in KB with ID: {report_result.get('kb_id')}")
+                else:
+                    st.error(report_result.get("message", "Failed to generate or store feedback report."))
+
 
    elif operation_mode == "Knowledge Base Explorer": # New Block
        st.subheader("🧠 KNOWLEDGE BASE EXPLORER")
