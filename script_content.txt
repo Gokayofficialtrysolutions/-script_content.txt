@@ -1475,6 +1475,7 @@ class TerminusOrchestrator:
        final_execution_results = []
        # Store classified intent from the first attempt to reuse in revisions
        first_attempt_intent_info = "No specific intent pre-classified or low confidence."
+       retrieved_kb_context_for_plan = "" # Initialize variable to store KB context
 
        while current_attempt <= max_revision_attempts:
            current_attempt += 1
@@ -1483,7 +1484,79 @@ class TerminusOrchestrator:
            current_planner_prompt = ""
            dynamic_agents_description = self.get_agent_capabilities_description()
 
-           if current_attempt == 1:
+           if current_attempt == 1: # Only attempt KB query and intent classification on the first attempt
+               # --- Step 1: Preliminary KB Query (if KB is available) ---
+               if self.knowledge_collection is not None:
+                   print("MasterPlanner: Attempting preliminary Knowledge Base query.")
+                   # Construct history string for KB query prompt (same as for main prompt)
+                   kb_query_history_to_consider = self.conversation_history[:-1] # Exclude current user_prompt
+                   kb_query_scored_history = []
+                   kb_query_relevant_history_turns = []
+                   current_prompt_lower_for_kb_keywords = user_prompt.lower()
+                   stopwords_for_kb_keywords = set(["a", "an", "the", "is", "are", "was", "were", "to", "of", "for", "on", "in", "and", "what", "who", "how", "why", "tell", "me", "about"])
+                   current_kb_keywords = {word for word in current_prompt_lower_for_kb_keywords.split() if word.isalnum() and word not in stopwords_for_kb_keywords and len(word) > 2}
+
+                   if current_kb_keywords and kb_query_history_to_consider:
+                       for i_kb, turn_kb in enumerate(kb_query_history_to_consider):
+                           turn_content_lower_kb = str(turn_kb.get('content', '')).lower()
+                           score_kb = sum(1 for keyword_kb in current_kb_keywords if keyword_kb in turn_content_lower_kb)
+                           if score_kb > 0:
+                               kb_query_scored_history.append({"turn": turn_kb, "score": score_kb, "original_index": i_kb})
+                       kb_query_scored_history.sort(key=lambda x_kb: (x_kb["score"], x_kb["original_index"]), reverse=True)
+                       kb_query_relevant_history_turns = [item_kb["turn"] for item_kb in kb_query_scored_history[:2]]
+                   if not kb_query_relevant_history_turns and kb_query_history_to_consider:
+                       kb_query_relevant_history_turns = kb_query_history_to_consider[-2:]
+
+                   kb_query_history_for_prompt_list = [f"{t['role'].capitalize()}: {str(t.get('content', ''))}" for t in kb_query_relevant_history_turns]
+                   kb_query_history_string_for_prompt = "\n".join(kb_query_history_for_prompt_list)
+                   kb_query_context_for_prompt = f"Relevant Conversation History:\n{kb_query_history_string_for_prompt}\n\n" if kb_query_history_string_for_prompt else ""
+
+                   kb_query_generation_prompt = (
+                       f"{kb_query_context_for_prompt}"
+                       f"Current User Request: '{user_prompt}'\n\n"
+                       f"Your task is to determine if retrieving information from a knowledge base would be beneficial for planning a response to the current user request. "
+                       f"The knowledge base contains summaries, processed documents, and key facts from previous interactions.\n"
+                       f"If retrieving information would be helpful, formulate a concise and effective search query string (max 5-7 words if possible) that can be used to search the knowledge base. "
+                       f"The query should aim to find the most relevant context or previously discussed details.\n"
+                       f"If you believe no specific information retrieval from the knowledge base is necessary for this particular request, output the exact string: NO_QUERY_NEEDED\n\n"
+                       f"Output ONLY the search query string OR the 'NO_QUERY_NEEDED' marker. Do not include any other explanations or text.\n\n"
+                       f"Search Query or Marker:"
+                   )
+
+                   planner_agent_for_kb_query = next((agent for agent in self.agents if agent.name == "MasterPlanner"), None) # Or a dedicated query agent
+                   if planner_agent_for_kb_query:
+                       print(f"MasterPlanner: Generating KB search query using {planner_agent_for_kb_query.name}...")
+                       kb_query_llm_response = await self.execute_agent(planner_agent_for_kb_query, kb_query_generation_prompt)
+
+                       generated_kb_query = ""
+                       if kb_query_llm_response.get("status") == "success":
+                           generated_kb_query = kb_query_llm_response.get("response", "").strip()
+                           print(f"MasterPlanner: LLM suggested KB query/marker: '{generated_kb_query}'")
+                       else:
+                           print(f"MasterPlanner: Failed to get KB query from LLM: {kb_query_llm_response.get('response')}")
+
+                       if generated_kb_query and generated_kb_query.upper() != "NO_QUERY_NEEDED":
+                           print(f"MasterPlanner: Retrieving knowledge with query: '{generated_kb_query}'")
+                           kb_results = await self.retrieve_knowledge(query_text=generated_kb_query, n_results=3)
+                           if kb_results.get("status") == "success" and kb_results.get("results"):
+                               formatted_kb_entries = []
+                               for i_res, res_item in enumerate(kb_results["results"]):
+                                   doc_preview = res_item.get('document', 'N/A')[:150] # Preview of content
+                                   meta_preview = str(res_item.get('metadata', '{}'))[:100] # Preview of metadata
+                                   formatted_kb_entries.append(f"  Result {i_res+1}: \"{doc_preview}...\" (Metadata: {meta_preview}...)")
+                               if formatted_kb_entries:
+                                   retrieved_kb_context_for_plan = "Previously retrieved relevant information from Knowledge Base:\n" + "\n".join(formatted_kb_entries)
+                                   print(f"MasterPlanner: Context built from KB:\n{retrieved_kb_context_for_plan}")
+                           else:
+                               print(f"MasterPlanner: Knowledge Base retrieval failed or found no results for query '{generated_kb_query}'. Message: {kb_results.get('message')}")
+                       elif generated_kb_query.upper() == "NO_QUERY_NEEDED":
+                           print("MasterPlanner: LLM indicated no KB query needed.")
+                   else:
+                       print("MasterPlanner: MasterPlanner agent not found, cannot generate KB query.")
+               else:
+                   print("MasterPlanner: Knowledge Base not available, skipping preliminary query.")
+
+               # --- Step 2: Intent Classification (existing logic) ---
                classified_intent_result = await self.classify_user_intent(user_prompt)
                if classified_intent_result and classified_intent_result.get("status") == "success":
                    top_intent = classified_intent_result.get("intent")
@@ -1523,13 +1596,19 @@ class TerminusOrchestrator:
                history_string_for_prompt = "\n".join(history_for_prompt_list)
                history_context_for_prompt = f"Recent relevant conversation history (for context, most recent of selected is last):\n{history_string_for_prompt}\n\n" if history_string_for_prompt else ""
 
+               # Prepare KB context string for the main prompt
+               kb_context_section_for_main_prompt = ""
+               if retrieved_kb_context_for_plan: # This was populated in the KB query step
+                   kb_context_section_for_main_prompt = f"Consider the following potentially relevant information retrieved from the knowledge base:\n{retrieved_kb_context_for_plan}\n\n"
+
                current_planner_prompt = (
                    f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for other specialized AI agents.\n\n"
                    f"{history_context_for_prompt}" # Use keyword-selected history
+                   f"{kb_context_section_for_main_prompt}" # Add KB context here
                    f"Analyze the following CURRENT user request: '{user_prompt}'\n\n"
-                   f"{first_attempt_intent_info}\n\n"
+                   f"{first_attempt_intent_info}\n\n" # Intent info also from first attempt
                    f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
-                   f"Based on the user request and ONLY the agents listed above, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
+                   f"Based on the user request, conversation history, and any provided knowledge base information, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
                    f"  - 'step_id': (Integer or String) A unique sequential identifier for the step (e.g., 1, 2, '2a').\n"
                    f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above), OR the special value 'parallel_group'.\n"
                    f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent. (Not used if agent_name is 'parallel_group').\n"
