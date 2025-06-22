@@ -384,6 +384,8 @@ from tools.auto_dev import auto_dev # Added for project scaffolding
 import chromadb
 from chromadb.utils import embedding_functions # For default embedding function
 import uuid # For generating unique IDs for knowledge entries
+from collections import defaultdict # For message bus subscribers
+from typing import Callable, Coroutine, Any # For type hinting subscribers
 
 @dataclass
 class Agent:
@@ -495,6 +497,104 @@ class TerminusOrchestrator:
            print(f"CRITICAL ERROR: Failed to initialize ChromaDB knowledge base: {e}")
            print("Knowledge base functionalities will be unavailable.")
            # self.knowledge_collection will remain None, methods should check for this.
+
+       # Inter-Agent Message Bus Setup
+       self.message_bus_subscribers = defaultdict(list) # Maps message_type to list of handlers (queues or async callbacks)
+       self.message_processing_tasks = set() # To keep track of tasks spawned for callback handlers
+       print("Inter-agent message bus initialized.")
+       self._setup_initial_event_listeners() # Call to setup built-in listeners
+
+   async def _handle_system_event(self, message: Dict):
+       # Simple event handler for logging/printing messages from the bus
+       print(f"[EVENT_HANDLER] Received Message :: ID: {message.get('message_id')}, Type: '{message.get('message_type')}', "
+             f"Source: '{message.get('source_agent_name')}', Payload: {message.get('payload')}")
+
+   def _setup_initial_event_listeners(self):
+       # Subscribe built-in handlers here
+       self.subscribe_to_message("kb.webcontent.added", self._handle_system_event)
+       self.subscribe_to_message("kb.code_explanation.added", self._handle_system_event) # For CodeMaster
+       self.subscribe_to_message("kb.code_module.added", self._handle_system_event)   # For CodeMaster
+       self.subscribe_to_message("kb.plan_execution_log.added", self._handle_system_event) # For MasterPlanner logs
+       # Add more general system event subscriptions if needed
+
+   async def publish_message(self, message_type: str, source_agent_name: str, payload: Dict) -> str:
+       # """ (Method Docstring as Comment)
+       # Publishes a message to the inter-agent message bus.
+       # Args:
+       #     message_type: String identifying the type/topic of the message.
+       #     source_agent_name: Name of the agent publishing the message.
+       #     payload: Dictionary containing the message-specific data.
+       # Returns:
+       #     The unique ID of the published message.
+       # """
+       if not isinstance(message_type, str) or not message_type.strip():
+           print("ERROR (MessageBus): message_type must be a non-empty string.")
+           return "" # Or raise error
+       if not isinstance(source_agent_name, str) or not source_agent_name.strip():
+           print("ERROR (MessageBus): source_agent_name must be a non-empty string.")
+           return "" # Or raise error
+       if not isinstance(payload, dict):
+           print("ERROR (MessageBus): payload must be a dictionary.")
+           return "" # Or raise error
+
+       message_id = str(uuid.uuid4())
+       message = {
+           "message_id": message_id,
+           "message_type": message_type,
+           "source_agent_name": source_agent_name,
+           "timestamp_iso": datetime.datetime.now().isoformat(),
+           "payload": payload
+       }
+
+       print(f"[MessageBus] Publishing message ID {message_id} of type '{message_type}' from '{source_agent_name}'. Payload keys: {list(payload.keys())}")
+
+       subscribers_for_type = self.message_bus_subscribers.get(message_type, [])
+       if not subscribers_for_type:
+           print(f"[MessageBus] No subscribers for message type '{message_type}'.")
+           return message_id # Still success, message published to no one
+
+       for handler in list(subscribers_for_type): # Iterate over a copy in case a handler modifies the list (e.g. unsubscribes)
+           try:
+               if asyncio.iscoroutinefunction(handler): # Check if it's an async def function
+                   # For async callback functions
+                   task = asyncio.create_task(handler(message))
+                   self.message_processing_tasks.add(task)
+                   task.add_done_callback(self.message_processing_tasks.discard) # Auto-remove when done
+                   print(f"[MessageBus] Dispatched message {message_id} to async callback handler {getattr(handler, '__name__', 'unknown_callback')}.")
+               elif isinstance(handler, asyncio.Queue):
+                   # For asyncio.Queue objects
+                   await handler.put(message)
+                   print(f"[MessageBus] Put message {message_id} onto a subscriber queue.")
+               else:
+                   print(f"WARNING (MessageBus): Subscriber for '{message_type}' is not an async function or asyncio.Queue. Handler: {handler}")
+           except Exception as e:
+               print(f"ERROR (MessageBus): Failed to dispatch message {message_id} to handler {handler}. Error: {e}")
+
+       return message_id
+
+   def subscribe_to_message(self, message_type: str, handler: Callable[..., Coroutine[Any, Any, None]] | asyncio.Queue):
+       # """ (Method Docstring as Comment)
+       # Subscribes a handler (an async callback function or an asyncio.Queue) to a specific message type.
+       # Args:
+       #     message_type: The type/topic of message to subscribe to.
+       #     handler: An asyncio.Queue instance or an async function (Coroutine) that accepts a single
+       #              argument (the message dictionary).
+       # """
+       if not isinstance(message_type, str) or not message_type.strip():
+           print("ERROR (MessageBus): message_type for subscription must be a non-empty string.")
+           return
+
+       is_async_func = asyncio.iscoroutinefunction(handler)
+       is_queue = isinstance(handler, asyncio.Queue)
+
+       if not (is_async_func or is_queue):
+           print(f"ERROR (MessageBus): Handler for message type '{message_type}' must be an async function or an asyncio.Queue. Provided: {type(handler)}")
+           return
+
+       self.message_bus_subscribers[message_type].append(handler)
+       handler_name = getattr(handler, '__name__', str(type(handler)))
+       print(f"[MessageBus] Handler '{handler_name}' subscribed to message type '{message_type}'.")
+
 
    async def _execute_single_plan_step(self, step_definition: Dict, full_plan_list: List[Dict], current_step_outputs: Dict) -> Dict:
        # """ (Method Docstring as Comment)
@@ -1001,8 +1101,23 @@ class TerminusOrchestrator:
                        "agent_used": codemaster_agent.name, # codemaster_agent is defined in this method
                        "model_used": codemaster_agent.model
                    }
-                   asyncio.create_task(self.store_knowledge(content=content_to_store, metadata=metadata))
-                   print(f"Orchestrator: Queued storage of generated code module (lang: '{language}') to Knowledge Base.")
+                   kb_store_task_generate = self.store_knowledge(content=content_to_store, metadata=metadata)
+                   async def store_and_publish_module():
+                       kb_store_result = await kb_store_task_generate
+                       print(f"Orchestrator: KB storage task completed for generated code module. Result: {kb_store_result}")
+                       if kb_store_result.get("status") == "success":
+                           await self.publish_message(
+                               message_type="kb.code_module.added",
+                               source_agent_name=codemaster_agent.name,
+                               payload={
+                                   "language": language,
+                                   "kb_id": kb_store_result.get("id"),
+                                   "requirements_preview": requirements[:100]+"...",
+                                   "code_preview": generated_code[:100]+"..."
+                               }
+                           )
+                   asyncio.create_task(store_and_publish_module())
+                   print(f"Orchestrator: Queued storage and publish event for generated code module (lang: '{language}') to Knowledge Base.")
 
                return {"status": "success", "message": "Code module generated successfully.", "generated_code": generated_code}
            else:
@@ -1061,8 +1176,23 @@ class TerminusOrchestrator:
                    }
                    # Use a hash of snippet and language for a potentially more stable ID if desired later,
                    # but for now, auto-generated UUID is fine.
-                   asyncio.create_task(self.store_knowledge(content=content_to_store, metadata=metadata))
-                   print(f"Orchestrator: Queued storage of code explanation for language '{language}' to Knowledge Base.")
+                   kb_store_task_explain = self.store_knowledge(content=content_to_store, metadata=metadata)
+                   async def store_and_publish_explanation():
+                       kb_store_result = await kb_store_task_explain
+                       print(f"Orchestrator: KB storage task completed for code explanation. Result: {kb_store_result}")
+                       if kb_store_result.get("status") == "success":
+                           await self.publish_message(
+                               message_type="kb.code_explanation.added",
+                               source_agent_name=explainer_agent.name,
+                               payload={
+                                   "language": language,
+                                   "kb_id": kb_store_result.get("id"),
+                                   "snippet_preview": code_snippet[:100]+"...",
+                                   "explanation_preview": explanation_text[:100]+"..."
+                               }
+                           )
+                   asyncio.create_task(store_and_publish_explanation())
+                   print(f"Orchestrator: Queued storage and publish event for code explanation (lang: '{language}') to Knowledge Base.")
 
                return {"status": "success", "message": "Code explained successfully.", "explanation": explanation_text}
            else:
@@ -1467,8 +1597,22 @@ class TerminusOrchestrator:
                        "scraped_timestamp": datetime.datetime.now().isoformat()
                    }
                    # Using asyncio.create_task for fire-and-forget, as the primary response shouldn't wait for KB.
-                   asyncio.create_task(self.store_knowledge(content=text_to_store_in_kb, metadata=kb_metadata))
-                   print(f"Orchestrator: KB storage task created for content from {url_to_scrape}")
+                    kb_store_task = self.store_knowledge(content=text_to_store_in_kb, metadata=kb_metadata)
+                    # We need the ID from store_knowledge if we want to publish it.
+                    # For a true fire-and-forget publish, we might not await kb_store_task directly here
+                    # or the publish task itself becomes fire-and-forget.
+                    # Let's make the publish also fire-and-forget.
+                    async def store_and_publish_web_content():
+                        kb_store_result = await kb_store_task
+                        print(f"Orchestrator: KB storage task completed for content from {url_to_scrape}. Result: {kb_store_result}")
+                        if kb_store_result.get("status") == "success":
+                            await self.publish_message(
+                                message_type="kb.webcontent.added",
+                                source_agent_name=agent.name, # WebCrawler
+                                payload={"url": url_to_scrape, "kb_id": kb_store_result.get("id"), "summary_preview": summary_for_response[:100]+"..."}
+                            )
+                    asyncio.create_task(store_and_publish_web_content())
+                    print(f"Orchestrator: KB storage and publish event task created for content from {url_to_scrape}")
 
                return {"agent": agent.name, "model": agent.model, "response": summary_for_response, "status": "success", "original_url": url_to_scrape, "full_content_length": len(scraped_content)}
            else: # Scraping failed
@@ -2399,8 +2543,24 @@ class TerminusOrchestrator:
                    kb_metadata[f"entity_{i+1}_type"] = entity.get("type", "UNK")
                    kb_metadata[f"entity_{i+1}_text"] = entity.get("text", "")
 
-           asyncio.create_task(self.store_knowledge(content=content_to_store, metadata=kb_metadata))
-           print(f"MasterPlanner: Queued storage of plan execution summary (Status: {final_plan_status}) to Knowledge Base.")
+           # Store and then publish event
+           kb_store_task_planlog = self.store_knowledge(content=content_to_store, metadata=kb_metadata)
+           async def store_and_publish_plan_log():
+               kb_store_result = await kb_store_task_planlog
+               print(f"MasterPlanner: KB storage task completed for plan execution log. Result: {kb_store_result}")
+               if kb_store_result.get("status") == "success":
+                   await self.publish_message(
+                       message_type="kb.plan_execution_log.added",
+                       source_agent_name="MasterPlanner", # Or "TerminusOrchestrator" if preferred for system events
+                       payload={
+                           "kb_id": kb_store_result.get("id"),
+                           "original_request_preview": user_prompt[:150],
+                           "overall_status": final_plan_status,
+                           "primary_intent": first_attempt_nlu_output.get("intent", "N/A")
+                       }
+                   )
+           asyncio.create_task(store_and_publish_plan_log())
+           print(f"MasterPlanner: Queued storage and publish event for plan execution summary (Status: {final_plan_status}) to Knowledge Base.")
        else:
            print("MasterPlanner: Knowledge Base not available, skipping storage of plan execution summary.")
 
