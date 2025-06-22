@@ -1708,6 +1708,7 @@ class TerminusOrchestrator:
        final_execution_results = []
        # Store classified intent from the first attempt to reuse in revisions
        first_attempt_intent_info = "No specific intent pre-classified or low confidence."
+       first_attempt_nlu_output = {} # Store the full NLU output from the first attempt
        retrieved_kb_context_for_plan = "" # Initialize variable to store KB context
        detailed_failure_context_for_revision = {} # Will store specific failure details for the revision prompt
 
@@ -1814,12 +1815,13 @@ class TerminusOrchestrator:
                    print("MasterPlanner: Knowledge Base not available, skipping preliminary query.")
 
                # --- Step 2: Intent Classification & Entity Recognition (Now combined) ---
-               nlu_output = await self.classify_user_intent(user_prompt) # This now returns intent and entities
+               nlu_output_from_classify = await self.classify_user_intent(user_prompt) # This now returns intent and entities
+               first_attempt_nlu_output = nlu_output_from_classify # Store for end-of-plan summary
 
                intent_str_part = "N/A"
-               if nlu_output.get("intent"):
-                   top_intent = nlu_output.get("intent")
-                   intent_scores = nlu_output.get("intent_scores", {})
+               if nlu_output_from_classify.get("intent"):
+                   top_intent = nlu_output_from_classify.get("intent")
+                   intent_scores = nlu_output_from_classify.get("intent_scores", {})
                    top_score = intent_scores.get(top_intent, 0)
                    if top_score > 0.7: # Confidence threshold for displaying intent
                        intent_str_part = f"'{top_intent}' (Confidence: {top_score:.2f})"
@@ -1827,8 +1829,8 @@ class TerminusOrchestrator:
                        intent_str_part = f"'{top_intent}' (Low Confidence: {top_score:.2f})"
 
                entities_str_part = "None detected."
-               if nlu_output.get("entities"):
-                   entity_strs = [f"{e.get('type', 'UNK')}: '{e.get('text', '')}' ({e.get('score', 0.0):.2f})" for e in nlu_output["entities"]]
+               if nlu_output_from_classify.get("entities"):
+                   entity_strs = [f"{e.get('type', 'UNK')}: '{e.get('text', '')}' ({e.get('score', 0.0):.2f})" for e in nlu_output_from_classify["entities"]]
                    if entity_strs:
                        entities_str_part = "; ".join(entity_strs)
 
@@ -2252,6 +2254,71 @@ class TerminusOrchestrator:
        self.conversation_history.append({"role": "assistant", "content": assistant_response_summary})
        if len(self.conversation_history) > self.max_history_items:
            self.conversation_history = self.conversation_history[-self.max_history_items:]
+
+       # --- Store Plan Execution Summary in Knowledge Base ---
+       if self.knowledge_collection is not None:
+           print("MasterPlanner: Preparing to store plan execution summary in Knowledge Base.")
+
+           # Determine overall status based on the final state of plan_succeeded_this_attempt
+           # Note: plan_succeeded_this_attempt reflects the outcome of the *last executed attempt*
+           final_plan_status = "success" if plan_succeeded_this_attempt else "failure"
+
+           # Summarize step results from the final attempt (stored in final_execution_results)
+           step_results_summary_list = []
+           if final_execution_results: # This holds results of the last attempt
+               for res_item in final_execution_results:
+                   step_results_summary_list.append({
+                       "step_id": res_item.get("step_id", "N/A"),
+                       "agent_name": res_item.get("agent", "N/A"),
+                       "status": res_item.get("status", "unknown"),
+                       "response_preview": str(res_item.get("response", ""))[:150] + "..."
+                   })
+
+           # Plan that was executed in the final attempt
+           # plan_json_str_for_this_attempt was set at the start of the *last* 'while' loop iteration
+           final_plan_attempted_json = plan_json_str_for_this_attempt
+
+           plan_execution_summary_dict = {
+               "version": "1.0",
+               "original_user_request": user_prompt,
+               "nlu_analysis_on_request": { # Use the stored NLU output from the first attempt
+                   "intent": first_attempt_nlu_output.get("intent"),
+                   "intent_scores": first_attempt_nlu_output.get("intent_scores"),
+                   "entities": first_attempt_nlu_output.get("entities", [])
+               },
+               "plan_json_executed": final_plan_attempted_json,
+               "execution_summary": {
+                   "overall_status": final_plan_status,
+                   "total_attempts": current_attempt, # current_attempt has the final count
+                   "final_attempt_step_results": step_results_summary_list,
+                   "outputs_from_successful_steps_final_attempt": dict(step_outputs) if plan_succeeded_this_attempt else {}
+                   # Only log step_outputs if the final attempt was a success, to avoid large logs of intermediate failed states.
+                   # Or, always log the step_outputs from the *last* attempt, regardless of its success.
+                   # For now, let's log step_outputs of the last attempt.
+                   # 'step_outputs' at this point reflects the outputs from the last executed attempt.
+               },
+               "user_facing_plan_outcome_summary": assistant_response_summary, # From the LLM summarizer
+               "log_timestamp_iso": datetime.datetime.now().isoformat()
+           }
+
+           content_to_store = json.dumps(plan_execution_summary_dict, indent=2)
+
+           kb_metadata = {
+               "source": "plan_execution_log",
+               "overall_status": final_plan_status,
+               "user_request_preview": user_prompt[:150],
+               "primary_intent": first_attempt_nlu_output.get("intent", "N/A"),
+               "log_timestamp_iso": plan_execution_summary_dict["log_timestamp_iso"]
+           }
+           if first_attempt_nlu_output.get("entities"):
+               for i, entity in enumerate(first_attempt_nlu_output["entities"][:3]): # Max 3 entities in metadata
+                   kb_metadata[f"entity_{i+1}_type"] = entity.get("type", "UNK")
+                   kb_metadata[f"entity_{i+1}_text"] = entity.get("text", "")
+
+           asyncio.create_task(self.store_knowledge(content=content_to_store, metadata=kb_metadata))
+           print(f"MasterPlanner: Queued storage of plan execution summary (Status: {final_plan_status}) to Knowledge Base.")
+       else:
+           print("MasterPlanner: Knowledge Base not available, skipping storage of plan execution summary.")
 
        return final_execution_results
 
