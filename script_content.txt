@@ -522,7 +522,7 @@ class TerminusOrchestrator:
        self.subscribe_to_message("kb.code_explanation.added", self._handle_system_event)
        self.subscribe_to_message("kb.code_module.added", self._handle_system_event)
        self.subscribe_to_message("kb.plan_execution_log.added", self._handle_system_event)
-       # Add more general system event subscriptions if needed using _handle_system_event
+       self.subscribe_to_message("user.feedback.submitted", self._handle_system_event) # For logging feedback submissions via bus too
 
        # Subscribe ContentAnalysisAgent's handler to specific KB addition events
        kb_content_added_event_types = [
@@ -954,6 +954,68 @@ class TerminusOrchestrator:
            print(f"ERROR: Failed to retrieve knowledge: {e}")
            return {"status": "error", "message": f"Failed to retrieve knowledge: {str(e)}", "results": []}
 
+   def store_user_feedback(self, item_id: str, item_type: str, rating: str,
+                           comment: Optional[str] = None,
+                           current_mode: Optional[str] = None,
+                           user_prompt_preview: Optional[str] = None) -> bool:
+       # """ (Method Docstring as Comment)
+       # Stores user feedback into a JSONL log file.
+       # Args:
+       #     item_id: Identifier of the item being rated.
+       #     item_type: Type of the item (e.g., "plan_outcome", "agent_response").
+       #     rating: User's rating ("positive", "negative", "neutral").
+       #     comment: Optional textual comment from the user.
+       #     current_mode: Optional UI operation mode active at feedback time.
+       #     user_prompt_preview: Optional preview of the user prompt related to the item.
+       # Returns:
+       #     True if feedback was stored successfully, False otherwise.
+       # """
+       try:
+           feedback_id = str(uuid.uuid4())
+           timestamp_iso = datetime.datetime.now().isoformat()
+
+           feedback_data = {
+               "feedback_id": feedback_id,
+               "timestamp_iso": timestamp_iso,
+               "item_id": str(item_id), # Ensure item_id is string
+               "item_type": str(item_type),
+               "rating": str(rating),
+               "comment": comment if comment is not None else "", # Ensure comment is string or empty
+               "user_context": {
+                   "session_id": None, # Placeholder for future
+                   "operation_mode": current_mode,
+                   "related_user_prompt_preview": user_prompt_preview[:200] if user_prompt_preview else None # Truncate preview
+               }
+           }
+
+           # Define log file path relative to the orchestrator's base directory
+           base_install_dir = Path(__file__).parent.parent
+           log_dir = base_install_dir / "logs"
+           log_dir.mkdir(parents=True, exist_ok=True) # Ensure logs directory exists
+           feedback_log_file = log_dir / "feedback_log.jsonl"
+
+           with open(feedback_log_file, 'a', encoding='utf-8') as f:
+               f.write(json.dumps(feedback_data) + '\n')
+
+           print(f"[Feedback] Stored feedback ID {feedback_id} for item {item_id} (Type: {item_type}, Rating: {rating}).")
+
+           # Optionally, also publish a message to the bus about new feedback
+           # This allows other components (e.g., a future analytics agent) to be aware of new feedback.
+           asyncio.create_task(self.publish_message(
+               message_type="user.feedback.submitted",
+               source_agent_name="UserFeedbackSystem", # Or identify UI as source
+               payload={
+                   "feedback_id": feedback_id,
+                   "item_id": str(item_id),
+                   "item_type": str(item_type),
+                   "rating": str(rating)
+               }
+           ))
+           return True
+       except Exception as e:
+           print(f"ERROR (Feedback): Failed to store user feedback for item {item_id}. Error: {e}")
+           return False
+
    async def _update_kb_item_metadata(self, kb_id: str, new_metadata_fields: Dict) -> Dict:
        # """ (Method Docstring as Comment)
        # Updates the metadata of an existing item in the Knowledge Base.
@@ -967,7 +1029,7 @@ class TerminusOrchestrator:
            return {"status": "error", "message": "Knowledge base not initialized."}
        if not kb_id or not isinstance(kb_id, str):
            return {"status": "error", "message": "Valid kb_id (string) is required."}
-       if not new_metadata_fields or not isinstance(new_metadata_fields, dict): # Check if it's a non-empty dict
+       if not new_metadata_fields or not isinstance(new_metadata_fields, dict) or not new_metadata_fields: # Ensure it's a non-empty dict
            return {"status": "error", "message": "new_metadata_fields must be a non-empty dictionary."}
 
        try:
@@ -2653,11 +2715,12 @@ class TerminusOrchestrator:
            successful_steps = sum(1 for res in final_execution_results if isinstance(res, dict) and res.get("status") == "success") if isinstance(final_execution_results, list) else 0
            assistant_response_summary = f"Plan executed: {successful_steps}/{num_steps} steps successful (Summarizer agent unavailable)."
 
-       self.conversation_history.append({"role": "assistant", "content": assistant_response_summary})
-       if len(self.conversation_history) > self.max_history_items:
-           self.conversation_history = self.conversation_history[-self.max_history_items:]
+       # Prepare the content for conversation history, potentially adding plan_log_kb_id later
+       assistant_history_entry = {"role": "assistant", "content": assistant_response_summary, "plan_log_kb_id": None}
+       # self.conversation_history.append(assistant_history_entry) # Append happens after KB store attempt
 
        # --- Store Plan Execution Summary in Knowledge Base ---
+       plan_log_stored_kb_id = None # Variable to hold the ID if stored
        if self.knowledge_collection is not None:
            print("MasterPlanner: Preparing to store plan execution summary in Knowledge Base.")
 
@@ -2723,11 +2786,13 @@ class TerminusOrchestrator:
                kb_store_result = await kb_store_task_planlog
                print(f"MasterPlanner: KB storage task completed for plan execution log. Result: {kb_store_result}")
                if kb_store_result.get("status") == "success":
+                   nonlocal plan_log_stored_kb_id # Modify the variable in the outer scope
+                   plan_log_stored_kb_id = kb_store_result.get("id")
                    await self.publish_message(
                        message_type="kb.plan_execution_log.added",
                        source_agent_name="MasterPlanner", # Or "TerminusOrchestrator" if preferred for system events
                        payload={
-                           "kb_id": kb_store_result.get("id"),
+                           "kb_id": plan_log_stored_kb_id,
                            "original_request_preview": user_prompt[:150],
                            "overall_status": final_plan_status,
                            "primary_intent": first_attempt_nlu_output.get("intent", "N/A")
@@ -2735,8 +2800,14 @@ class TerminusOrchestrator:
                    )
            asyncio.create_task(store_and_publish_plan_log())
            print(f"MasterPlanner: Queued storage and publish event for plan execution summary (Status: {final_plan_status}) to Knowledge Base.")
-       else:
-           print("MasterPlanner: Knowledge Base not available, skipping storage of plan execution summary.")
+
+       # Now add to conversation history, including the plan_log_kb_id if it was stored
+       if plan_log_stored_kb_id:
+           assistant_history_entry["plan_log_kb_id"] = plan_log_stored_kb_id
+
+       self.conversation_history.append(assistant_history_entry)
+       if len(self.conversation_history) > self.max_history_items:
+           self.conversation_history = self.conversation_history[-self.max_history_items:]
 
        return final_execution_results
 
@@ -2816,12 +2887,54 @@ EOF
 create_terminus_ui_script() {
     progress "CREATING TERMINUS UI SCRIPT"
     cat>"$INSTALL_DIR/terminus_ui.py"<<'EOF'
-import streamlit as st,asyncio,json,os,subprocess,time,datetime # Ensure time and datetime are imported
+import streamlit as st,asyncio,json,os,subprocess,time,datetime,uuid # Ensure time, datetime, and uuid are imported
 from pathlib import Path # Path is used for temp_video_path
 import pandas as pd,plotly.express as px,plotly.graph_objects as go
 from agents.master_orchestrator import orchestrator,doc_processor,web_intel
 
 st.set_page_config(page_title="TERMINUS AI",layout="wide",initial_sidebar_state="expanded")
+
+# Helper function for feedback widgets
+def display_feedback_widgets(item_id: str, item_type: str,
+                             key_suffix: str, # To ensure unique widget keys
+                             current_operation_mode: str,
+                             related_prompt_preview: Optional[str] = None):
+    st.write("---") # Visual separator for feedback section
+    st.caption("Rate this response/item:")
+    cols = st.columns([1,1,1, 5]) # Thumbs up, Thumbs down, Spacer, Comment Area
+
+    feedback_submitted_key = f"feedback_submitted_{key_suffix}"
+
+    if feedback_submitted_key not in st.session_state:
+        st.session_state[feedback_submitted_key] = None
+
+    if st.session_state[feedback_submitted_key]:
+        st.success(f"Thanks for your feedback ({st.session_state[feedback_submitted_key]})!")
+        return # Don't show buttons again if feedback already given for this item in this render
+
+    comment_key = f"comment_{key_suffix}"
+    user_comment = st.text_area("Optional comment:", key=comment_key, height=75)
+
+    if cols[0].button("👍 Positive", key=f"positive_{key_suffix}"):
+        if orchestrator.store_user_feedback(item_id, item_type, "positive", user_comment, current_operation_mode, related_prompt_preview):
+            st.session_state[feedback_submitted_key] = "Positive"
+            st.rerun() # Re-run to show confirmation and hide buttons
+        else:
+            st.error("Failed to store feedback.")
+
+    if cols[1].button("👎 Negative", key=f"negative_{key_suffix}"):
+        if orchestrator.store_user_feedback(item_id, item_type, "negative", user_comment, current_operation_mode, related_prompt_preview):
+            st.session_state[feedback_submitted_key] = "Negative"
+            st.rerun()
+        else:
+            st.error("Failed to store feedback.")
+
+    if user_comment and not (cols[0].button or cols[1].button): # If comment exists but no rating button pressed yet
+        # This part is tricky with Streamlit's execution model. A dedicated "Submit Comment" button might be better
+        # if we want to submit comments without a rating. For now, comment is submitted WITH a rating.
+        pass
+
+
 
 def main():
    st.markdown("""<div style='text-align:center;background:linear-gradient(90deg,#FF6B6B,#4ECDC4,#45B7D1,#96CEB4);padding:20px;border-radius:10px;margin-bottom:20px'>
@@ -2914,6 +3027,16 @@ def main():
                                expanded_default_regular = True if result.get("response") else False
                                with st.expander(f"{status_icon} {result.get('agent', 'N/A')} ({result.get('model', 'N/A')})", expanded=expanded_default_regular):
                                    st.write(str(result.get("response",""))) # Ensure response is a string
+
+                                   # Add feedback for this individual agent response
+                                   response_item_id = str(uuid.uuid4()) # Generate unique ID for this displayed response
+                                   display_feedback_widgets(
+                                       item_id=response_item_id,
+                                       item_type="agent_chat_response",
+                                       key_suffix=f"agent_resp_{response_item_id}",
+                                       current_operation_mode=operation_mode,
+                                       related_prompt_preview=user_prompt[:200]
+                                   )
                else:
                    st.warning("Please enter a prompt.")
 
@@ -2938,6 +3061,24 @@ def main():
                            elif role == "Assistant":
                                st.markdown(f"**🤖 Assistant (Summary/Response):**") # Clarified role
                                st.text_area("", value=content, height=100, disabled=True, key=unique_key)
+                               # Add feedback for MasterPlanner's overall outcome summary
+                               # The 'content' here is the assistant_response_summary from execute_master_plan
+                               plan_log_kb_id_for_feedback = turn.get("plan_log_kb_id")
+                               if plan_log_kb_id_for_feedback:
+                                   feedback_item_id_plan = plan_log_kb_id_for_feedback
+                                   item_type_for_feedback = "master_plan_log_outcome" # More specific
+                               else:
+                                   # Fallback if plan_log_kb_id somehow wasn't set
+                                   feedback_item_id_plan = f"plan_outcome_fallback_{user_prompt[:50]}_{timestamp_for_key}"
+                                   item_type_for_feedback = "master_plan_outcome_fallback"
+
+                               display_feedback_widgets(
+                                   item_id=feedback_item_id_plan,
+                                   item_type=item_type_for_feedback,
+                                   key_suffix=f"plan_outcome_{timestamp_for_key}", # Unique key for UI state
+                                   current_operation_mode=operation_mode,
+                                   related_prompt_preview=user_prompt[:200] # The user_prompt that initiated this plan
+                               )
                            else: # Should not happen with current history structure but good for robustness
                                st.markdown(f"**{role}:**")
                                st.text_area("", value=content, height=100, disabled=True, key=unique_key)
@@ -3459,6 +3600,16 @@ def main():
                                    st.json(metadata_content)
                                else:
                                    st.caption("No metadata for this item.")
+
+                           # Add feedback for this KB result item
+                           kb_item_id = item.get('id', f"kb_res_{i}")
+                           display_feedback_widgets(
+                               item_id=kb_item_id,
+                               item_type="kb_search_result",
+                               key_suffix=f"kb_{kb_item_id}", # Unique key for session state
+                               current_operation_mode=operation_mode,
+                               related_prompt_preview=query_text[:200] # The search query used
+                           )
                            st.divider()
                    else:
                        st.info(f"No results found in the Knowledge Base for your query: '{query_text}'.")
