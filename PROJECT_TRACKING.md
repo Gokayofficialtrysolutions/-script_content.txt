@@ -36,7 +36,7 @@
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
-**Overall AGI Orchestrator Progress:** ~18-22% (V1 foundations + V1.x enhancements in MasterPlanner orchestration and Knowledge Base contribute to this).
+**Overall AGI Orchestrator Progress:** ~20-25% (V1 foundations, V1.x enhancements in MasterPlanner orchestration & Knowledge Base, and the new Inter-Agent Message Bus foundation contribute to this).
 
 ### Phase X: Advanced Cognitive Orchestration
 *Key Objectives:*
@@ -44,8 +44,8 @@
     *   [X] Complex Plan Execution (parallel, conditional, looping/retry) - *Initial retry and parallel execution implemented.*
     *   [X] Dynamic Plan Adaptation & Learning - *Initial targeted revision context implemented.*
     *   [ ] Resource-Aware & Prioritized Planning
-*   [ ] **Sophisticated Intent Understanding & Contextual Awareness:**
-    *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *MasterPlanner KB pre-query is a step towards better contextual awareness.*
+*   [X] **Sophisticated Intent Understanding & Contextual Awareness:** (Initial NLU enhancements implemented)
+    *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *Enhanced with NER for entity extraction; MasterPlanner KB pre-query leverages this for better contextual awareness.*
     *   [ ] Dedicated NLU module/agent
     *   [ ] Richer contextual model of interaction & user objectives
 
@@ -66,7 +66,8 @@
 *   [ ] **Advanced Tool Discovery & Augmentation:**
     *   [ ] Dynamically discover, evaluate, learn new tools/APIs
     *   [ ] Agents request/suggest new tool integrations
-*   [ ] **Sophisticated Inter-Agent Communication & Collaboration:**
+*   [X] **Sophisticated Inter-Agent Communication & Collaboration:** (Initial foundation laid)
+    *   [X] Basic asynchronous message bus implemented, enabling event broadcasting and subscription by agents/components.
     *   [ ] Advanced protocols for negotiation, complex info sharing, coordination
     *   [ ] Multi-agent consensus, task delegation, shared goal understanding
 *   [ ] **Proactive & Goal-Oriented Assistance:**
