@@ -1305,13 +1305,70 @@ class TerminusOrchestrator:
         elif "network config" in prompt_lower or "ip address" in prompt_lower or "network interfaces" in prompt_lower:
             return await self.get_network_config()
         else:
-            return {
-                "status": "info",
-                "agent": "SystemAdmin",
-                "response": f"SystemAdmin received: '{prompt}'. Command not recognized for direct execution. Supported commands: 'disk space', 'memory usage', 'top N processes', 'cpu info', 'os info', 'network config'."
-            }
-    else:
-        try:
+            # Fallback for SystemAdmin if no specific command matches
+            # This could also be an LLM call to SystemAdmin for general queries.
+            # For now, just info.
+            return {"status": "info", "agent": agent.name, "response": f"SystemAdmin received: '{prompt}'. No direct command matched."}
+
+       elif agent.name == "WebCrawler":
+           # Assuming prompt is a URL for direct scraping.
+           # More complex WebCrawler tasks (like performing a search first) would need more structured prompts or a different entry point.
+           url_to_scrape = prompt
+           print(f"Orchestrator: WebCrawler task for URL: {url_to_scrape}")
+
+           scrape_result = web_intel.scrape_page(url_to_scrape) # This is synchronous
+
+           if scrape_result.get("status") == "success":
+               scraped_content = scrape_result.get("content", "")
+               text_to_store_in_kb = ""
+               summary_for_response = ""
+
+               if not scraped_content:
+                   message = f"Successfully scraped URL, but content was empty: {url_to_scrape}"
+                   summary_for_response = message # Return this message as main response
+                   text_to_store_in_kb = f"Scraped empty content from {url_to_scrape}" # Store this note in KB
+               else:
+                   # Summarize before storing and returning
+                   summarizer_agent = next((a for a in self.agents if a.name == "DocProcessor"), None) # Or CreativeWriter
+                   if summarizer_agent and self.knowledge_collection is not None: # Only summarize if KB is available to store
+                       # Take first 10k chars for summarization to keep prompt reasonable
+                       content_excerpt_for_summary = scraped_content[:10000]
+                       summarization_prompt = f"Please provide a concise summary (2-4 sentences) of the following web page content:\n\n{content_excerpt_for_summary}"
+                       print(f"Orchestrator: Requesting summarization for {url_to_scrape} from {summarizer_agent.name}")
+
+                       summary_llm_result = await self.execute_agent(summarizer_agent, summarization_prompt) # Recursive call
+
+                       if summary_llm_result.get("status") == "success" and summary_llm_result.get("response","").strip():
+                           summary_for_response = summary_llm_result.get("response").strip()
+                           text_to_store_in_kb = summary_for_response
+                           print(f"Orchestrator: Summarization successful for {url_to_scrape}.")
+                       else:
+                           print(f"Orchestrator: Summarization failed for {url_to_scrape}. Using excerpt for KB and response. Error: {summary_llm_result.get('response')}")
+                           summary_for_response = scraped_content[:1000] + "..." # Fallback response
+                           text_to_store_in_kb = scraped_content[:2000] # Store a larger excerpt in KB
+                   else: # No summarizer agent or KB not available
+                       print(f"Orchestrator: Summarizer agent not found or KB unavailable. Using excerpt for {url_to_scrape}.")
+                       summary_for_response = scraped_content[:1000] + "..."
+                       text_to_store_in_kb = scraped_content[:2000] # Store excerpt if no summary
+
+               # Store in Knowledge Base (asynchronous, fire and forget for now, or await if critical)
+               if self.knowledge_collection is not None and text_to_store_in_kb:
+                   kb_metadata = {
+                       "source": "web_scrape",
+                       "url": url_to_scrape,
+                       "retrieval_query": url_to_scrape, # As it was a direct URL scrape
+                       "scraped_timestamp": datetime.datetime.now().isoformat()
+                   }
+                   # Using asyncio.create_task for fire-and-forget, as the primary response shouldn't wait for KB.
+                   asyncio.create_task(self.store_knowledge(content=text_to_store_in_kb, metadata=kb_metadata))
+                   print(f"Orchestrator: KB storage task created for content from {url_to_scrape}")
+
+               return {"agent": agent.name, "model": agent.model, "response": summary_for_response, "status": "success", "original_url": url_to_scrape, "full_content_length": len(scraped_content)}
+           else: # Scraping failed
+               return {"agent": agent.name, "model": agent.model, "response": scrape_result.get("message", "Scraping failed"), "status": "error", "original_url": url_to_scrape}
+
+       else: # Default LLM agent execution
+           try:
                payload = {"model": agent.model, "prompt": f"[{agent.specialty}] {prompt}", "stream": False, "options": {"temperature": 0.7}}
                if context:
                    payload["prompt"] += f"\nContext: {json.dumps(context)}"
@@ -1957,9 +2014,35 @@ class WebIntelligence:
    def scrape_page(self,url):
        try:
            from bs4 import BeautifulSoup
+           print(f"WebIntelligence: Attempting to scrape URL: {url}")
            resp=self.session.get(url,timeout=10)
-           return BeautifulSoup(resp.content,'html.parser').get_text()[:5000]
-       except:return "Scraping failed"
+           resp.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+
+           soup = BeautifulSoup(resp.content,'html.parser')
+           # Attempt to remove common non-content tags before extracting text
+           for tag in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form']):
+               tag.decompose()
+
+           full_text = soup.get_text(separator=' ', strip=True)
+
+           if not full_text:
+               print(f"WebIntelligence: Scraped empty content from URL: {url}")
+               return {"status": "success", "content": "", "url": url, "message": "Scraped content was empty."} # Still success, but empty
+
+           print(f"WebIntelligence: Successfully scraped URL: {url}. Content length: {len(full_text)}")
+           return {"status": "success", "content": full_text, "url": url}
+       except requests.exceptions.HTTPError as e:
+           error_message = f"HTTP error during scrape: {e}"
+           print(f"WebIntelligence: {error_message} for URL: {url}")
+           return {"status": "error", "message": error_message, "url": url}
+       except requests.exceptions.RequestException as e: # Other request errors (DNS, connection, timeout)
+           error_message = f"Request error during scrape: {e}"
+           print(f"WebIntelligence: {error_message} for URL: {url}")
+           return {"status": "error", "message": error_message, "url": url}
+       except Exception as e:
+           error_message = f"Generic error during scrape: {str(e)}"
+           print(f"WebIntelligence: {error_message} for URL: {url}")
+           return {"status": "error", "message": error_message, "url": url}
 
 orchestrator=TerminusOrchestrator()
 doc_processor=DocumentUniverse()
