@@ -483,6 +483,94 @@ class TerminusOrchestrator:
            print("Knowledge base functionalities will be unavailable.")
            # self.knowledge_collection will remain None, methods should check for this.
 
+   async def _execute_single_plan_step(self, step_definition: Dict, full_plan_list: List[Dict], current_step_outputs: Dict) -> Dict:
+       """
+       Executes a single, non-parallel plan step, including its own retry logic.
+       Args:
+           step_definition: The dictionary defining the step to execute.
+           full_plan_list: The entire list of plan steps (used for resolving dependencies' output_variable_name).
+           current_step_outputs: Dictionary of outputs from already executed steps in the current plan attempt.
+       Returns:
+           A dictionary representing the result of the step execution.
+       """
+       step_id = step_definition.get("step_id")
+       agent_name = step_definition.get("agent_name")
+       task_prompt = step_definition.get("task_prompt", "")
+       dependencies = step_definition.get("dependencies", [])
+       output_var_name = step_definition.get("output_variable_name")
+
+       # Retrieve retry parameters for this specific step
+       max_retries = step_definition.get("max_retries", 0)
+       retry_delay_seconds = step_definition.get("retry_delay_seconds", 5)
+       retry_on_statuses = step_definition.get("retry_on_statuses", ["error"])
+
+       current_execution_retries = 0 # Renamed to avoid conflict with group retries
+
+       target_agent = next((a for a in self.agents if a.name == agent_name), None)
+       if not target_agent:
+           return {"status": "error", "agent": agent_name, "step_id": step_id, "response": f"Agent '{agent_name}' not found for step {step_id}."}
+
+       step_result = {} # Ensure step_result is defined
+
+       while True: # Inner loop for step's own execution and retries
+           current_task_prompt = task_prompt
+           for dep_id in dependencies:
+               dep_output_key_to_find = None
+               for prev_step_def in full_plan_list:
+                   if prev_step_def.get("step_id") == dep_id:
+                       # Try to get output from the main step_outputs (if dep was sequential)
+                       # or from a parallel group's aggregated output
+                       # This part might need refinement if prev_step_def was a parallel group
+                       # For now, assume direct output_variable_name is in current_step_outputs
+                       dep_output_key_to_find = prev_step_def.get("output_variable_name", f"step_{dep_id}_output")
+                       break
+
+               if dep_output_key_to_find and dep_output_key_to_find in current_step_outputs:
+                   # Check if the dependency output is a dictionary (e.g. from a parallel group)
+                   # and if the task_prompt is trying to access a sub-key
+                   # Example: {{{{agg_output.sub_output_A}}}}
+                   match = re.match(r"{{{{(\w+)\.(.+)}}}}", current_task_prompt)
+                   if match and match.group(1) == dep_output_key_to_find and isinstance(current_step_outputs[dep_output_key_to_find], dict):
+                       # This is a simplistic way to handle one level of sub-key access
+                       # A more robust template engine might be needed for complex cases
+                       sub_key = match.group(2)
+                       if sub_key in current_step_outputs[dep_output_key_to_find]:
+                           replacement_value = str(current_step_outputs[dep_output_key_to_find][sub_key])
+                           current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}.{sub_key}}}}}", replacement_value)
+                       else:
+                           print(f"Warning: Sub-key '{sub_key}' not found in output of dependency step {dep_id} (variable {dep_output_key_to_find}) for step {step_id}.")
+                   else: # Standard replacement
+                        current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(current_step_outputs[dep_output_key_to_find]))
+               elif dep_output_key_to_find: # Key was found in plan but not in outputs
+                   print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found in current_step_outputs for step {step_id}. Prompt may be incomplete.")
+               # If dep_output_key_to_find is None, the dependency wasn't in full_plan_list (should not happen if plan is valid)
+
+           log_prompt = f"Executing single step {step_id}"
+           if current_execution_retries > 0:
+               log_prompt += f" (Retry {current_execution_retries}/{max_retries})"
+           log_prompt += f": Agent='{agent_name}', Prompt='{current_task_prompt[:100]}...'"
+           print(log_prompt)
+
+           step_result = await self.execute_agent(target_agent, current_task_prompt)
+
+           if step_result.get("status") == "success":
+               key_to_store = output_var_name if output_var_name else f"step_{step_id}_output"
+               current_step_outputs[key_to_store] = step_result.get("response") # Modify current_step_outputs directly
+               for media_key in ["image_path", "frame_path", "gif_path", "speech_path", "modified_file"]:
+                   if media_key in step_result:
+                       current_step_outputs[f"{key_to_store}_{media_key}"] = step_result[media_key]
+               return step_result # Return success result
+
+           current_execution_retries += 1
+           if current_execution_retries <= max_retries and step_result.get("status") in retry_on_statuses:
+               print(f"Single step {step_id} failed with status '{step_result.get('status')}'. Retrying in {retry_delay_seconds}s... ({current_execution_retries}/{max_retries})")
+               await asyncio.sleep(retry_delay_seconds)
+           else:
+               print(f"Single step {step_id} (Agent: {agent_name}) failed permanently after {current_execution_retries-1} retries or due to non-retryable status '{step_result.get('status')}'.")
+               return step_result # Return final failure result
+
+       return step_result # Should be unreachable if loop logic is correct, but as a fallback
+
    async def store_knowledge(self, content: str, metadata: Optional[Dict] = None, content_id: Optional[str] = None) -> Dict:
        if self.knowledge_collection is None:
            return {"status": "error", "message": "Knowledge base not initialized."}
@@ -1442,19 +1530,27 @@ class TerminusOrchestrator:
                    f"{first_attempt_intent_info}\n\n"
                    f"Available specialized agents and their capabilities are:\n{dynamic_agents_description}\n\n"
                    f"Based on the user request and ONLY the agents listed above, create a JSON plan as a list of steps. Each step must be a JSON object with the following fields:\n"
-                   f"  - 'step_id': (Integer) A unique sequential identifier for the step (e.g., 1, 2, ...).\n"
-                   f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above).\n"
-                   f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent for this step. This prompt should be directly usable by the agent.\n"
-                   f"  - 'dependencies': (Optional, List[Integer]) A list of 'step_id's that this step depends on. The outputs of these dependency steps can be referenced in the 'task_prompt' using {{{{output_variable_name_of_dependency_step}}}} syntax if needed.\n"
-                   f"  - 'output_variable_name': (Optional, String) A descriptive variable name (e.g., 'analysis_result', 'generated_image_path') to store the primary output of this step. This can be used by subsequent dependent steps.\n"
-                   f"  - 'max_retries': (Integer, Optional, Default: 0) Maximum number of times to retry this step if it fails. Use for tasks like network requests that might have transient failures.\n"
-                   f"  - 'retry_delay_seconds': (Integer, Optional, Default: 5) Seconds to wait before retrying this step.\n"
-                   f"  - 'retry_on_statuses': (List[String], Optional, Default: [\"error\"]) List of failure statuses (e.g., \"error\", \"timeout\") that should trigger a retry for this step.\n\n"
-                   f"Example of a simple step: {{'step_id': 1, 'agent_name': 'WebCrawler', 'task_prompt': 'Search for recent news about topic X.', 'output_variable_name': 'news_summary'}}\n"
-                   f"Example of a dependent step: {{'step_id': 2, 'agent_name': 'CreativeWriter', 'task_prompt': 'Write a blog post based on this summary: {{{{news_summary}}}}', 'dependencies': [1]}}\n"
-                   f"Example of a step with retry logic: {{'step_id': 3, 'agent_name': 'WebCrawler', 'task_prompt': 'Fetch data from http://unreliable-api.com/data', 'output_variable_name': 'api_data', 'max_retries': 2, 'retry_delay_seconds': 10, 'retry_on_statuses': ['error', 'timeout']}}\n\n"
-                   f"IMPORTANT: Output ONLY the JSON plan as a raw string. Do not include any other text, explanations, or markdown formatting. The JSON must be a valid list of objects.\n"
-                   f"If the user request is simple and can be handled by a single agent directly, create a one-step plan. If the request is ambiguous or cannot be planned, return an empty JSON list []. Use retry parameters judiciously for steps prone to transient issues."
+                   f"  - 'step_id': (Integer or String) A unique sequential identifier for the step (e.g., 1, 2, '2a').\n"
+                   f"  - 'agent_name': (String) The name of the agent to execute this step (must be one of the available agents listed above), OR the special value 'parallel_group'.\n"
+                   f"  - 'task_prompt': (String) The specific, self-contained prompt for the target agent. (Not used if agent_name is 'parallel_group').\n"
+                   f"  - 'dependencies': (Optional, List[Integer/String]) A list of 'step_id's that this step depends on. Outputs are referenced using {{{{output_variable_name_of_dependency_step}}}}.\n"
+                   f"  - 'output_variable_name': (Optional, String) A descriptive variable name for the step's primary output.\n"
+                   f"  - 'max_retries': (Integer, Optional, Default: 0) Max retries for this step/group.\n"
+                   f"  - 'retry_delay_seconds': (Integer, Optional, Default: 5) Delay before retry.\n"
+                   f"  - 'retry_on_statuses': (List[String], Optional, Default: [\"error\"]) Statuses triggering retry.\n\n"
+                   f"Parallel Execution Block (using 'parallel_group'):\n"
+                   f"To define a set of tasks that can run in parallel, create a step with 'agent_name': 'parallel_group'. This step must contain a 'sub_steps' key, which is a list of standard step objects.\n"
+                   f"  - 'sub_steps': (List[Object]) Each object is a normal step definition. Sub-steps are executed concurrently.\n"
+                   f"    - CRITICAL: Sub-steps within the same 'parallel_group' must be input-independent of each other. Their 'dependencies' should only refer to steps *outside* the group (i.e., steps the parent group depends on, or earlier sequential steps).\n"
+                   f"    - The 'output_variable_name' of the 'parallel_group' step will collect outputs from its sub-steps (keyed by sub-step's 'output_variable_name' or 'step_id').\n\n"
+                   f"Example of a sequential step with retry: {{'step_id': 1, 'agent_name': 'WebCrawler', 'task_prompt': 'Fetch primary_data_url', 'output_variable_name': 'primary_data', 'max_retries': 2, 'retry_on_statuses': ['error', 'timeout']}}\n"
+                   f"Example of a parallel group: \n"
+                   f"    {{'step_id': 2, 'agent_name': 'parallel_group', 'dependencies': [1], 'output_variable_name': 'gathered_info', 'sub_steps': [\n"
+                   f"        {{'step_id': '2a', 'agent_name': 'WebCrawler', 'task_prompt': 'Fetch detail_A from {{{{primary_data.urlA}}}}', 'output_variable_name': 'detail_A_content'}},\n"
+                   f"        {{'step_id': '2b', 'agent_name': 'DocProcessor', 'task_prompt': 'Summarize text {{{{primary_data.text_field}}}}', 'output_variable_name': 'summary_of_text'}}\n"
+                   f"    ]}}\n"
+                   f"Example of a subsequent sequential step: {{'step_id': 3, 'agent_name': 'CreativeWriter', 'task_prompt': 'Combine: {{{{gathered_info.detail_A_content}}}} and {{{{gathered_info.summary_of_text}}}}.', 'dependencies': [2]}}\n\n"
+                   f"IMPORTANT: Output ONLY the JSON plan as a raw string. Do not include any other text. Ensure sub-steps in a parallel group are truly independent. Use retry parameters judiciously."
                )
            else: # Revision attempt
                if not original_plan_json_str:
@@ -1560,83 +1656,143 @@ class TerminusOrchestrator:
            # Enhanced Plan Step Schema (for documentation purposes within the code):
            # Each step in the 'plan_list' is a dictionary. Beyond the validated keys
            # ('step_id', 'agent_name', 'task_prompt'), it can optionally include:
-           #   - 'dependencies': (List[Integer]) IDs of steps this one depends on.
+           #   - 'dependencies': (List[Integer/String]) IDs of steps this one depends on.
            #   - 'output_variable_name': (String) Variable name for this step's output.
            #   - 'max_retries': (Integer, Default: 0) Max retry attempts for this step.
            #   - 'retry_delay_seconds': (Integer, Default: 5) Delay before a retry.
            #   - 'retry_on_statuses': (List[String], Default: ["error"]) Statuses that trigger retry.
+           # For 'parallel_group' agent_name:
+           #   - 'sub_steps': (List[Object]) List of standard step definitions.
 
            # Proceed with execution if plan is valid
-           for step in sorted(plan_list, key=lambda x: x.get('step_id', 0)):
-               step_id = step.get("step_id")
-               agent_name = step.get("agent_name")
-               task_prompt = step.get("task_prompt", "")
-               dependencies = step.get("dependencies", [])
-               output_var_name = step.get("output_variable_name")
+           for step_definition in sorted(plan_list, key=lambda x: x.get('step_id', 0)):
 
-               # Retrieve retry parameters for the step, with defaults
-               max_retries = step.get("max_retries", 0)
-               retry_delay_seconds = step.get("retry_delay_seconds", 5)
-               retry_on_statuses = step.get("retry_on_statuses", ["error"])
+               # This is the main loop for sequential steps or parallel groups
+               # Retry logic for the *overall step/group* will be handled here.
 
-               current_step_retries = 0
+               group_max_retries = step_definition.get("max_retries", 0)
+               group_retry_delay = step_definition.get("retry_delay_seconds", 5)
+               group_retry_statuses = step_definition.get("retry_on_statuses", ["error"])
+               group_current_retries = 0
 
-               target_agent = next((a for a in self.agents if a.name == agent_name), None)
-               if not target_agent:
-                   current_attempt_results.append({"status": "error", "agent": agent_name, "step_id": step_id, "response": f"Agent '{agent_name}' not found for step {step_id}."})
-                   plan_succeeded_this_attempt = False; break
+               while True: # Loop for group-level retries
+                   step_id = step_definition.get("step_id")
+                   agent_name = step_definition.get("agent_name")
 
-               while True: # Inner loop for step execution and retries
-                   current_task_prompt = task_prompt
-                   for dep_id in dependencies:
-                       dep_output_key_to_find = None
-                       for prev_step_def in plan_list: # Find the dependency step's output_variable_name
-                           if prev_step_def.get("step_id") == dep_id:
-                               dep_output_key_to_find = prev_step_def.get("output_variable_name", f"step_{dep_id}_output")
-                               break
-                       if dep_output_key_to_find and dep_output_key_to_find in step_outputs:
-                           current_task_prompt = current_task_prompt.replace(f"{{{{{dep_output_key_to_find}}}}}", str(step_outputs[dep_output_key_to_find]))
+                   group_log_prompt = f"Processing step/group {step_id} (Agent: {agent_name})"
+                   if group_current_retries > 0:
+                       group_log_prompt += f" (Overall Retry {group_current_retries}/{group_max_retries})"
+                   print(group_log_prompt)
+
+                   group_step_result = None # Result for the whole group or single step
+
+                   if agent_name == "parallel_group":
+                       sub_steps = step_definition.get("sub_steps", [])
+                       if not sub_steps:
+                           print(f"Warning: Parallel group {step_id} has no sub_steps. Skipping.")
+                           group_step_result = {"status": "success", "response": "No sub-steps to execute.", "sub_step_results": []}
+                           # Or treat as error? For now, success with empty results.
                        else:
-                           print(f"Warning: Output for dependency step {dep_id} (variable {dep_output_key_to_find}) not found for step {step_id}. Prompt may be incomplete.")
+                           # Validate sub_steps (basic validation)
+                           valid_sub_steps = True
+                           for i, sub_step_def in enumerate(sub_steps):
+                               if not (isinstance(sub_step_def, dict) and
+                                       sub_step_def.get("step_id") and
+                                       sub_step_def.get("agent_name") and
+                                       sub_step_def.get("task_prompt")):
+                                   group_step_result = {"status": "error", "agent": agent_name, "step_id": step_id,
+                                                        "response": f"Invalid sub_step at index {i} in group {step_id}."}
+                                   valid_sub_steps = False; break
+                           if not valid_sub_steps:
+                               current_attempt_results.append(group_step_result)
+                               plan_succeeded_this_attempt = False; break # Break from group retry loop
 
-                   log_prompt = f"Executing step {step_id}"
-                   if current_step_retries > 0:
-                       log_prompt += f" (Retry {current_step_retries}/{max_retries})"
-                   log_prompt += f": Agent='{agent_name}', Prompt='{current_task_prompt[:100]}...'"
-                   print(log_prompt)
+                           sub_step_tasks = []
+                           for sub_step_def in sub_steps:
+                               # Pass the main plan_list for dependency resolution from outside the group
+                               # Pass current step_outputs for resolving dependencies
+                               sub_step_tasks.append(self._execute_single_plan_step(sub_step_def, plan_list, step_outputs))
 
-                   step_result = await self.execute_agent(target_agent, current_task_prompt)
+                           # Execute sub-steps concurrently
+                           print(f"Executing {len(sub_step_tasks)} sub-steps in parallel for group {step_id}...")
+                           gathered_results = await asyncio.gather(*sub_step_tasks, return_exceptions=True)
 
-                   # If successful, break retry loop and process result
-                   if step_result.get("status") == "success":
-                       current_attempt_results.append(step_result) # Add success result
-                       key_to_store = output_var_name if output_var_name else f"step_{step_id}_output"
-                       step_outputs[key_to_store] = step_result.get("response")
-                       # Store rich media paths if available
-                       for media_key in ["image_path", "frame_path", "gif_path", "speech_path", "modified_file"]:
-                           if media_key in step_result:
-                               step_outputs[f"{key_to_store}_{media_key}"] = step_result[media_key]
-                       break # Exit retry loop for this step
+                           # Process results of parallel execution
+                           all_sub_steps_succeeded = True
+                           aggregated_outputs = {}
+                           processed_gathered_results = []
 
-                   # If failed, check retry conditions
-                   current_step_retries += 1
-                   if current_step_retries <= max_retries and step_result.get("status") in retry_on_statuses:
-                       print(f"Step {step_id} failed with status '{step_result.get('status')}'. Retrying in {retry_delay_seconds}s... ({current_step_retries}/{max_retries})")
-                       await asyncio.sleep(retry_delay_seconds)
-                       # The loop will continue for a retry
-                   else: # Retries exhausted or status not eligible for retry
-                       print(f"Step {step_id} (Agent: {agent_name}) failed permanently after {current_step_retries-1} retries or due to non-retryable status '{step_result.get('status')}'. Plan attempt {current_attempt} halted.")
-                       current_attempt_results.append(step_result) # Add final failure result
-                       plan_succeeded_this_attempt = False
-                       break # Exit retry loop for this step
+                           for i, res_or_exc in enumerate(gathered_results):
+                               sub_step_id_for_log = sub_steps[i].get('step_id', f"sub_step_{i}")
+                               if isinstance(res_or_exc, Exception):
+                                   print(f"Sub-step {sub_step_id_for_log} in group {step_id} raised an exception: {res_or_exc}")
+                                   all_sub_steps_succeeded = False
+                                   # Store the exception as a result
+                                   processed_gathered_results.append({
+                                       "status": "error", "step_id": sub_step_id_for_log,
+                                       "agent": sub_steps[i].get('agent_name'),
+                                       "response": f"Exception: {str(res_or_exc)}"
+                                   })
+                                   # No break here, let all parallel tasks finish or fail
+                               elif res_or_exc.get("status") != "success":
+                                   print(f"Sub-step {sub_step_id_for_log} in group {step_id} failed with status: {res_or_exc.get('status')}")
+                                   all_sub_steps_succeeded = False
+                                   processed_gathered_results.append(res_or_exc)
+                                   # No break here
+                               else: # Sub-step succeeded
+                                   processed_gathered_results.append(res_or_exc)
+                                   sub_output_var = sub_steps[i].get("output_variable_name", sub_step_id_for_log)
+                                   aggregated_outputs[sub_output_var] = res_or_exc.get("response")
+                                   # Also store rich media from sub-steps if any, prefixing with sub_output_var
+                                   for media_key in ["image_path", "frame_path", "gif_path", "speech_path", "modified_file"]:
+                                       if media_key in res_or_exc:
+                                            aggregated_outputs[f"{sub_output_var}_{media_key}"] = res_or_exc[media_key]
 
-               if not plan_succeeded_this_attempt: # If a step failed permanently, break the outer plan execution loop
+                           if all_sub_steps_succeeded:
+                               group_output_var = step_definition.get("output_variable_name", f"step_{step_id}_output")
+                               step_outputs[group_output_var] = aggregated_outputs
+                               group_step_result = {"status": "success", "step_id": step_id, "agent": agent_name,
+                                                    "response": "All sub-steps completed successfully.",
+                                                    "sub_step_results": processed_gathered_results,
+                                                    "aggregated_outputs": aggregated_outputs}
+                           else:
+                               group_step_result = {"status": "error", "step_id": step_id, "agent": agent_name,
+                                                    "response": "One or more sub-steps failed in parallel group.",
+                                                    "sub_step_results": processed_gathered_results}
+                   else: # Regular sequential step
+                       # Call the refactored single step execution logic
+                       # step_outputs is passed to be modified by _execute_single_plan_step on success
+                       group_step_result = await self._execute_single_plan_step(step_definition, plan_list, step_outputs)
+
+                   # --- End of processing for this attempt of step/group ---
+
+                   if group_step_result.get("status") == "success":
+                       current_attempt_results.append(group_step_result)
+                       # If it was a single step, its output would have been added to step_outputs by _execute_single_plan_step
+                       # If it was a parallel group, its aggregated_outputs were added to step_outputs if successful
+                       break # Break from group-level retry loop
+                   else: # Group/step failed
+                       group_current_retries += 1
+                       if group_current_retries <= group_max_retries and group_step_result.get("status") in group_retry_statuses:
+                           print(f"Step/Group {step_id} failed with status '{group_step_result.get('status')}'. Retrying overall group/step in {group_retry_delay}s... ({group_current_retries}/{group_max_retries})")
+                           await asyncio.sleep(group_retry_delay)
+                           # Loop continues for group retry
+                       else:
+                           print(f"Step/Group {step_id} (Agent: {agent_name}) failed permanently for this plan attempt.")
+                           current_attempt_results.append(group_step_result) # Add final failure of group/step
+                           plan_succeeded_this_attempt = False
+                           break # Break from group-level retry loop
+
+               if not plan_succeeded_this_attempt: # If a step/group failed permanently, break the outer plan execution loop
                    break
 
            final_execution_results = current_attempt_results
            if plan_succeeded_this_attempt:
                print(f"Plan attempt {current_attempt} succeeded.")
                break # Exit while loop
+           # If loop finished due to plan failure (plan_succeeded_this_attempt is False)
+           # and there are more overall plan revision attempts, the outer 'while current_attempt <= max_revision_attempts' will continue.
+           # If revisions are exhausted, it will also break from the outer while.
 
        # Summarization and history update for the assistant's response
        summarizer_agent = next((agent for agent in self.agents if agent.name == "CreativeWriter"), None)
