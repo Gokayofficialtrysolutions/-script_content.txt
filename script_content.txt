@@ -916,6 +916,23 @@ class TerminusOrchestrator:
                     return {"status": "error", "message": "CodeMaster returned empty code for the module."}
 
                print("Code module generated successfully.")
+
+               # Store generated module in Knowledge Base
+               if self.knowledge_collection is not None:
+                   content_to_store = (
+                       f"Requirements:\n---\n{requirements}\n---\n"
+                       f"Generated Code ({language}):\n---\n{generated_code}\n---"
+                   )
+                   metadata = {
+                       "source": "code_generation",
+                       "language": language,
+                       "generated_timestamp": datetime.datetime.now().isoformat(),
+                       "agent_used": codemaster_agent.name, # codemaster_agent is defined in this method
+                       "model_used": codemaster_agent.model
+                   }
+                   asyncio.create_task(self.store_knowledge(content=content_to_store, metadata=metadata))
+                   print(f"Orchestrator: Queued storage of generated code module (lang: '{language}') to Knowledge Base.")
+
                return {"status": "success", "message": "Code module generated successfully.", "generated_code": generated_code}
            else:
                err_msg = generation_result.get('response', 'CodeMaster failed to generate the code module.')
@@ -957,6 +974,25 @@ class TerminusOrchestrator:
                     return {"status": "error", "message": f"{explainer_agent.name} returned an empty explanation."}
 
                print("Code explanation generated successfully.")
+
+               # Store explanation in Knowledge Base
+               if self.knowledge_collection is not None:
+                   content_to_store = (
+                       f"Code Snippet ({language}):\n---\n{code_snippet}\n---\n"
+                       f"Explanation:\n---\n{explanation_text}\n---"
+                   )
+                   metadata = {
+                       "source": "code_explanation",
+                       "language": language,
+                       "explained_timestamp": datetime.datetime.now().isoformat(),
+                       "agent_used": explainer_agent.name,
+                       "model_used": explainer_agent.model
+                   }
+                   # Use a hash of snippet and language for a potentially more stable ID if desired later,
+                   # but for now, auto-generated UUID is fine.
+                   asyncio.create_task(self.store_knowledge(content=content_to_store, metadata=metadata))
+                   print(f"Orchestrator: Queued storage of code explanation for language '{language}' to Knowledge Base.")
+
                return {"status": "success", "message": "Code explained successfully.", "explanation": explanation_text}
            else:
                err_msg = explanation_result.get('response', f'{explainer_agent.name} failed to explain the code.')
