@@ -199,6 +199,22 @@ This document summarizes the major phases, key features implemented, and signifi
         *   Documented the necessary changes to the `execute_master_plan` method to include `extracted_topics` (from KB items) in the context provided to the MasterPlanner LLM.
         *   Documented updates to the MasterPlanner LLM's main system prompt to instruct it to consider these topics for better planning. (These changes were documented for manual application due to tool limitations with direct file modification of the complex installer script).
 
+## Phase 16: Enhanced Planner Intelligence (Feedback & Topics) and System Robustness
+*   **Objective:** Improve MasterPlanner's decision-making by enabling it to learn from past feedback and utilize richer context (topics). Concurrently, enhance system robustness through better error handling and script interactions.
+*   **Key Features & Changes (Conceptual & Documented for Manual Application due to Tool Limitations):**
+    *   **MasterPlanner Feedback Utilization (Conceptual Design):**
+        *   Designed logic within `execute_master_plan` for MasterPlanner to query the KB for `feedback_analysis_report` documents.
+        *   Designed parsing of these reports to extract actionable insights.
+        *   Outlined modifications to the MasterPlanner's main prompt to include these feedback insights, guiding it to adapt planning strategies.
+    *   **MasterPlanner Topic Utilization (Conceptual Design & Prompt Update Documentation):**
+        *   Re-documented (from Phase 15) the necessary changes to `execute_master_plan` for formatting KB item context to include `extracted_topics`.
+        *   Re-documented updates to the MasterPlanner LLM's main system prompt to instruct it to consider `extracted_topics`.
+    *   **System Robustness - Error Logging (Conceptual Design):**
+        *   Defined more granular `try-except` blocks and enhanced logging messages for `_handle_new_kb_content_for_analysis` and `generate_and_store_feedback_report` to improve debuggability.
+    *   **System Robustness - Script Output Validation (Conceptual Design):**
+        *   Designed structural validation checks (e.g., for expected keys) for the JSON output received from `feedback_analyzer.py` within `generate_and_store_feedback_report`.
+    *   **Note on Application:** Direct application of these fine-grained Python code changes within the `updated_terminus_installer.sh` script via automated tools proved unreliable. The changes are documented for future manual application or application via a more robust method.
+
 ## Ongoing Challenges & Notes
 *   **Dependency Version Lookup:** (Resolved) The concern about placeholder dependencies in `README.md` has been addressed; all dependencies in `*_requirements.txt` are now pinned. The `passlib` specific issue was also resolved to `passlib==1.7.4`.
 *   **Subtask Reporting Inconsistencies:** (Historical Note) Throughout development, there were several instances where subtask execution reports did not align with the requested task, requiring manual verification or re-runs. This complicated progress tracking. (This note remains for historical context of the overall project development if it refers to agent's interaction with a human, not specific to this session's automated tasks).

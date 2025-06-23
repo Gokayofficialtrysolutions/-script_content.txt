@@ -36,8 +36,9 @@
 *   [X] MasterPlanner: Leverages extracted keywords from KB items (when available) to improve contextual understanding during planning.
 *   [X] Inter-Agent Communication: Basic asynchronous message bus implemented.
 *   [X] Knowledge Base: Automated content analysis (keyword extraction) for new KB items via message bus.
-*   [X] Knowledge Base: Automated content analysis now includes topic modeling alongside keyword extraction.
+*   [X] Knowledge Base: Automated content analysis now includes topic modeling alongside keyword extraction. (MasterPlanner utilization of topics documented for manual code update).
 *   [X] User Feedback: System can analyze collected feedback and store a summary report in the Knowledge Base.
+*   [ ] MasterPlanner: Designed logic for utilizing feedback analysis reports from KB to adapt planning (implementation pending).
 *   [X] System Integration: Performed conceptual integrated testing of major components (MasterPlanner, KB, Message Bus, Feedback).
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
@@ -60,13 +61,14 @@
 *   [X] **Persistent & Adaptive Knowledge Base:** (Core implemented)
     *   [X] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations) - *ChromaDB backend, store/retrieve methods, UI explorer implemented. Initial data types: doc excerpts, web summaries, code explanations/generations, plan execution logs.*
     *   [ ] Hybrid DB approach (vector + graph) - *Currently vector-only.*
-*   [X] **Comprehensive User Feedback Loop & Reinforcement Learning:** (Initial feedback collection & analysis implemented)
+*   [X] **Comprehensive User Feedback Loop & Reinforcement Learning:** (Initial feedback collection & analysis implemented; planner integration designed)
     *   [X] Explicit user feedback mechanisms (ratings, corrections) - *UI widgets for feedback (positive/negative/comment) added to key AGI outputs. Feedback is logged to a file and an event is published on the message bus.*
     *   [X] System analyzes feedback to generate summary reports, stored in KB.
+    *   [ ] MasterPlanner to actively use feedback reports from KB for plan adaptation (conceptual design complete).
     *   [ ] RL frameworks for adjusting behavior, prompts, tool selection
-*   [X] **Knowledge Ingestion & Synthesis:** (Basic agent-driven ingestion & reactive analysis implemented)
+*   [X] **Knowledge Ingestion & Synthesis:** (Basic agent-driven ingestion & reactive analysis implemented; planner integration designed)
     *   [X] Autonomous ingestion from documents/links - *WebCrawler and DocumentProcessor (via UI) now store processed content/summaries in KB. CodeMaster stores explanations/generations.*
-    *   [X] Reactive analysis of new KB content (e.g., keyword extraction, topic modeling) triggered via message bus.
+    *   [X] Reactive analysis of new KB content (e.g., keyword extraction, topic modeling) triggered via message bus. (MasterPlanner utilization of topics documented for manual code update).
     *   [ ] Summarization & indexing of ingested data - *Basic summarization before storage for WebCrawler; indexing is inherent to ChromaDB. Keyword extraction and topic modeling enhance discoverability.*
 
 ### Phase Z: Expanded Autonomy & Collaborative Intelligence
@@ -114,7 +116,7 @@
 *   [ ] **Formalized Ethical AI & Safety Protocols:**
     *   [ ] Develop/implement safety, value alignment, explainability, controllability
 *   [ ] **Resilience & Robustness:**
-    *   [ ] Graceful handling of unforeseen circumstances, novel problems
+    *   [ ] Graceful handling of unforeseen circumstances, novel problems - *Conceptual design for improved error logging and script output validation completed.*
 
 ### Cross-Cutting Concerns (Continuous Development)
 *   [ ] Security & Sandboxing
