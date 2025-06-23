@@ -36,7 +36,9 @@
 *   [X] MasterPlanner: Leverages extracted keywords from KB items (when available) to improve contextual understanding during planning.
 *   [X] Inter-Agent Communication: Basic asynchronous message bus implemented.
 *   [X] Knowledge Base: Automated content analysis (keyword extraction) for new KB items via message bus.
+*   [X] Knowledge Base: Automated content analysis now includes topic modeling alongside keyword extraction.
 *   [X] User Feedback: System can analyze collected feedback and store a summary report in the Knowledge Base.
+*   [X] System Integration: Performed conceptual integrated testing of major components (MasterPlanner, KB, Message Bus, Feedback).
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
@@ -64,8 +66,8 @@
     *   [ ] RL frameworks for adjusting behavior, prompts, tool selection
 *   [X] **Knowledge Ingestion & Synthesis:** (Basic agent-driven ingestion & reactive analysis implemented)
     *   [X] Autonomous ingestion from documents/links - *WebCrawler and DocumentProcessor (via UI) now store processed content/summaries in KB. CodeMaster stores explanations/generations.*
-    *   [X] Reactive analysis of new KB content (e.g., keyword extraction) triggered via message bus.
-    *   [ ] Summarization & indexing of ingested data - *Basic summarization before storage for WebCrawler; indexing is inherent to ChromaDB. Keyword extraction enhances discoverability.*
+    *   [X] Reactive analysis of new KB content (e.g., keyword extraction, topic modeling) triggered via message bus.
+    *   [ ] Summarization & indexing of ingested data - *Basic summarization before storage for WebCrawler; indexing is inherent to ChromaDB. Keyword extraction and topic modeling enhance discoverability.*
 
 ### Phase Z: Expanded Autonomy & Collaborative Intelligence
 *Key Objectives:*

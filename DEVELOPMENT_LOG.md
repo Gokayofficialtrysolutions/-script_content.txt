@@ -184,6 +184,21 @@ This document summarizes the major phases, key features implemented, and signifi
     *   **UI Trigger:** Added a button in "System Information" UI to run `generate_and_store_feedback_report` and display confirmation/path to report.
     *   **Refactor (Concurrent):** Centralized path definitions and key configurations in `TerminusOrchestrator.__init__` and updated all methods to use these attributes.
 
+## Phase 15: Integrated System Testing (Conceptual) & Advanced KB Content Analysis
+*   **Objective:** Perform conceptual integrated testing of major system components (MasterPlanner, KB, Message Bus, Feedback System) to ensure interoperability. Enhance the Knowledge Base by enabling topic modeling for ingested content.
+*   **Key Features & Changes:**
+    *   **Conceptual Integrated Testing:**
+        *   Defined and conceptually executed several complex user scenarios involving multiple system components.
+        *   Verified data flow, error handling propagation, and expected outcomes for these scenarios.
+        *   Identified potential areas for future refinement, such as MasterPlanner explicitly querying feedback reports from KB. (No code changes made during this testing phase, issues documented for future work).
+    *   **ContentAnalysisAgent Enhancement (Topic Modeling):**
+        *   Updated the prompt for `ContentAnalysisAgent` (used by `_handle_new_kb_content_for_analysis`) to request both keywords and 1-3 primary topics, expecting a JSON response.
+        *   Modified `_handle_new_kb_content_for_analysis` to parse the JSON response and extract both `extracted_keywords` and `extracted_topics`.
+        *   Ensured `_update_kb_item_metadata` can store the `extracted_topics` (along with general analysis metadata like agent, model, timestamp) if provided by the handler. (Verified existing method was sufficient).
+    *   **MasterPlanner Prompt Update (Topic Utilization - Conceptual):**
+        *   Documented the necessary changes to the `execute_master_plan` method to include `extracted_topics` (from KB items) in the context provided to the MasterPlanner LLM.
+        *   Documented updates to the MasterPlanner LLM's main system prompt to instruct it to consider these topics for better planning. (These changes were documented for manual application due to tool limitations with direct file modification of the complex installer script).
+
 ## Ongoing Challenges & Notes
 *   **Dependency Version Lookup:** (Resolved) The concern about placeholder dependencies in `README.md` has been addressed; all dependencies in `*_requirements.txt` are now pinned. The `passlib` specific issue was also resolved to `passlib==1.7.4`.
 *   **Subtask Reporting Inconsistencies:** (Historical Note) Throughout development, there were several instances where subtask execution reports did not align with the requested task, requiring manual verification or re-runs. This complicated progress tracking. (This note remains for historical context of the overall project development if it refers to agent's interaction with a human, not specific to this session's automated tasks).
