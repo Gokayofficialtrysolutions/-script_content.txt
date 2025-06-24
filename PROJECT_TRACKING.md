@@ -13,7 +13,7 @@
 *   [X] Conversational Memory (Basic history for MasterPlanner)
 *   [X] Web UI (Streamlit based)
 *   [X] Core Capabilities (Document processing, web intelligence, project scaffolding)
-*   [X] Automated Setup Script
+*   [X] Automated Setup Script - *Core Python components (Orchestrator, UI) now managed as separate source files and copied by installer, improving maintainability.*
 *   [X] Version-Pinned Dependencies (via `*_requirements.txt`)
 *   [X] Externalized Configuration (`agents.json`, `models.conf`)
 

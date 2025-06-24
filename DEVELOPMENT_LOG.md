@@ -215,6 +215,18 @@ This document summarizes the major phases, key features implemented, and signifi
         *   Designed structural validation checks (e.g., for expected keys) for the JSON output received from `feedback_analyzer.py` within `generate_and_store_feedback_report`.
     *   **Note on Application:** Direct application of these fine-grained Python code changes within the `updated_terminus_installer.sh` script via automated tools proved unreliable. The changes are documented for future manual application or application via a more robust method.
 
+## Phase 17: Critical Codebase Refactoring - Python Source Separation
+*   **Objective:** Decouple core Python application code (`master_orchestrator.py`, `terminus_ui.py`) from the main bash installer script (`updated_terminus_installer.sh`) to improve maintainability and enable reliable automated code modifications.
+*   **Key Features & Changes:**
+    *   **Python File Externalization:**
+        *   The complete Python code for `master_orchestrator.py` (including all previously developed features and conceptual enhancements for topic/feedback utilization by MasterPlanner, improved logging, and validation logic) was extracted and saved to a new dedicated file: `src/agents/master_orchestrator.py`.
+        *   The complete Python code for `terminus_ui.py` was extracted and saved to a new dedicated file: `src/terminus_ui.py`.
+    *   **Installer Script Modification (Conceptual - Documented for Manual Application):**
+        *   The `create_agent_orchestration_script` function in `updated_terminus_installer.sh` was conceptually redesigned. The heredoc embedding `master_orchestrator.py` code is to be removed and replaced with bash commands to copy `src/agents/master_orchestrator.py` from the source distribution to `$INSTALL_DIR/agents/`.
+        *   The `create_terminus_ui_script` function in `updated_terminus_installer.sh` was conceptually redesigned. The heredoc embedding `terminus_ui.py` code is to be removed and replaced with bash commands to copy `src/terminus_ui.py` from the source distribution to `$INSTALL_DIR/`.
+    *   **Note on Installer Script Changes:** Direct automated modification of `updated_terminus_installer.sh` to implement these `cp` command replacements was deferred due to persistent tool limitations with large heredoc manipulations. The exact bash changes were documented for manual application.
+    *   **Benefit:** This refactoring, once the bash script is manually updated, will allow future Python code changes to be made directly to the `.py` files, which is a more standard and robust development practice.
+
 ## Ongoing Challenges & Notes
 *   **Dependency Version Lookup:** (Resolved) The concern about placeholder dependencies in `README.md` has been addressed; all dependencies in `*_requirements.txt` are now pinned. The `passlib` specific issue was also resolved to `passlib==1.7.4`.
 *   **Subtask Reporting Inconsistencies:** (Historical Note) Throughout development, there were several instances where subtask execution reports did not align with the requested task, requiring manual verification or re-runs. This complicated progress tracking. (This note remains for historical context of the overall project development if it refers to agent's interaction with a human, not specific to this session's automated tasks).
