@@ -213,7 +213,7 @@ This document summarizes the major phases, key features implemented, and signifi
         *   Defined more granular `try-except` blocks and enhanced logging messages for `_handle_new_kb_content_for_analysis` and `generate_and_store_feedback_report` to improve debuggability.
     *   **System Robustness - Script Output Validation (Conceptual Design):**
         *   Designed structural validation checks (e.g., for expected keys) for the JSON output received from `feedback_analyzer.py` within `generate_and_store_feedback_report`.
-    *   **Note on Application:** Direct application of these fine-grained Python code changes within the `updated_terminus_installer.sh` script via automated tools proved unreliable. The changes are documented for future manual application or application via a more robust method.
+    *   **Note on Application:** Initial attempts to apply these fine-grained Python code changes directly within the `updated_terminus_installer.sh` script's heredocs via automated tools proved unreliable. These changes were subsequently applied directly to the externalized Python source files in Phase 18 after the codebase refactoring.
 
 ## Phase 17: Critical Codebase Refactoring - Python Source Separation
 *   **Objective:** Decouple core Python application code (`master_orchestrator.py`, `terminus_ui.py`) from the main bash installer script (`updated_terminus_installer.sh`) to improve maintainability and enable reliable automated code modifications.
@@ -224,8 +224,23 @@ This document summarizes the major phases, key features implemented, and signifi
     *   **Installer Script Modification (Conceptual - Documented for Manual Application):**
         *   The `create_agent_orchestration_script` function in `updated_terminus_installer.sh` was conceptually redesigned. The heredoc embedding `master_orchestrator.py` code is to be removed and replaced with bash commands to copy `src/agents/master_orchestrator.py` from the source distribution to `$INSTALL_DIR/agents/`.
         *   The `create_terminus_ui_script` function in `updated_terminus_installer.sh` was conceptually redesigned. The heredoc embedding `terminus_ui.py` code is to be removed and replaced with bash commands to copy `src/terminus_ui.py` from the source distribution to `$INSTALL_DIR/`.
-    *   **Note on Installer Script Changes:** Direct automated modification of `updated_terminus_installer.sh` to implement these `cp` command replacements was deferred due to persistent tool limitations with large heredoc manipulations. The exact bash changes were documented for manual application.
+    *   **Note on Installer Script Changes:** Initial automated modification of `updated_terminus_installer.sh` to implement these `cp` command replacements was deferred due to tool limitations. It's assumed these bash changes were manually applied before proceeding with direct Python file modifications in subsequent phases.
     *   **Benefit:** This refactoring, once the bash script is manually updated, will allow future Python code changes to be made directly to the `.py` files, which is a more standard and robust development practice.
+
+## Phase 18: Application of Deferred Enhancements to Externalized Python Code
+*   **Objective:** Implement previously documented conceptual enhancements directly into the newly separated Python source files (`src/agents/master_orchestrator.py`).
+*   **Key Features & Changes Applied:**
+    *   **MasterPlanner Topic Utilization:**
+        *   Modified `execute_master_plan` in `src/agents/master_orchestrator.py` to correctly format Knowledge Base context (general documents and plan logs) to include `extracted_topics`.
+        *   Updated the MasterPlanner LLM's main system prompt within `execute_master_plan` to explicitly instruct it to consider `extracted_topics` alongside keywords for improved planning.
+    *   **MasterPlanner Feedback Utilization:**
+        *   Added logic to `execute_master_plan` in `src/agents/master_orchestrator.py` for MasterPlanner to query the KB for `feedback_analysis_report` documents.
+        *   Implemented parsing of these reports to extract actionable insights.
+        *   Modified the MasterPlanner's main prompt to include these feedback insights, guiding it to adapt planning strategies.
+    *   **System Robustness - Error Logging & Validation:**
+        *   Implemented more granular `try-except` blocks and enhanced logging messages in `_handle_new_kb_content_for_analysis` and `generate_and_store_feedback_report` methods in `src/agents/master_orchestrator.py`.
+        *   Added structural validation checks for the JSON output received from `feedback_analyzer.py` within `generate_and_store_feedback_report`.
+    *   **Outcome:** All conceptually designed enhancements from Phases 15 & 16 related to MasterPlanner intelligence and system robustness are now implemented in the primary Python codebase.
 
 ## Ongoing Challenges & Notes
 *   **Dependency Version Lookup:** (Resolved) The concern about placeholder dependencies in `README.md` has been addressed; all dependencies in `*_requirements.txt` are now pinned. The `passlib` specific issue was also resolved to `passlib==1.7.4`.

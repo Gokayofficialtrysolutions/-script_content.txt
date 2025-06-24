@@ -390,8 +390,21 @@ class TerminusOrchestrator:
                    if kb_res_general.get("status")=="success" and kb_res_general.get("results"):
                        entries = []
                        for item in kb_res_general["results"]:
-                           analysis = "; ".join([f"{k.split('_')[-1].capitalize()}: {str(v)[:70]}..." for k,v in item.get("metadata",{}).items() if k in ["extracted_keywords","extracted_topics"]])
-                           entries.append(f"Doc ID {item.get('id')}: \"{item.get('document','')[:100]}...\" (Analysis: {analysis if analysis else 'N/A'})")
+                           doc_preview = item.get('document', 'N/A')[:150]
+                           meta_dict = item.get('metadata', {})
+                           meta_preview = str(meta_dict)[:100]
+
+                           analysis_parts = []
+                           if meta_dict and meta_dict.get("extracted_keywords"):
+                               analysis_parts.append(f"Keywords: {str(meta_dict['extracted_keywords'])[:70]}...")
+                           if meta_dict and meta_dict.get("extracted_topics"):
+                               analysis_parts.append(f"Topics: {str(meta_dict['extracted_topics'])[:70]}...")
+
+                           analysis_str = ""
+                           if analysis_parts:
+                               analysis_str = f" (Analysis: {'; '.join(analysis_parts)})"
+
+                           entries.append(f"Doc ID {item.get('id')}: \"{doc_preview}...\" (Metadata: {meta_preview}...){analysis_str}")
                        if entries: kb_general_ctx_str = "General KB Context:\n" + "\n".join(entries)
                # Plan Log KB Query
                if self.knowledge_collection and first_attempt_nlu_output.get("intent"):
@@ -400,10 +413,16 @@ class TerminusOrchestrator:
                    print(f"{plan_handler_id} INFO: Querying plan log KB with: '{query_text_plan_logs[:100]}...'")
                    kb_res_logs = await self.retrieve_knowledge(query_text_plan_logs, n_results=1, filter_metadata={"source":"plan_execution_log", "primary_intent":first_attempt_nlu_output.get("intent")})
                    if kb_res_logs.get("status")=="success" and kb_res_logs.get("results"):
-                       # ... (logic to parse log and format for prompt, including topics/keywords from log's KB metadata) ...
-                       log_item = kb_res_logs["results"][0]; log_data = json.loads(log_item.get("document","{}"))
-                       analysis = "; ".join([f"{k.split('_')[-1].capitalize()}: {str(v)[:70]}..." for k,v in log_item.get("metadata",{}).items() if k in ["extracted_keywords","extracted_topics"]])
-                       kb_plan_log_ctx_str = f"Past Plan Log Insight: For request '{log_data.get('original_user_request','N/A')[:50]}...', status was '{log_data.get('execution_summary',{}).get('overall_status','N/A')}' (Analysis: {analysis if analysis else 'N/A'})."
+                       log_item = kb_res_logs["results"][0]
+                       log_data = json.loads(log_item.get("document","{}"))
+                       log_item_metadata = log_item.get("metadata", {})
+                       log_analysis_parts = []
+                       if log_item_metadata.get("extracted_keywords"):
+                           log_analysis_parts.append(f"Keywords: {str(log_item_metadata['extracted_keywords'])[:70]}...")
+                       if log_item_metadata.get("extracted_topics"):
+                           log_analysis_parts.append(f"Topics: {str(log_item_metadata['extracted_topics'])[:70]}...")
+                       log_analysis_str = f" (Log Analysis: {'; '.join(log_analysis_parts)})" if log_analysis_parts else ""
+                       kb_plan_log_ctx_str = f"Past Plan Log Insight: For request '{log_data.get('original_user_request','N/A')[:50]}...', status was '{log_data.get('execution_summary',{}).get('overall_status','N/A')}'{log_analysis_str}."
                # Feedback Report KB Query (NEW)
                if self.knowledge_collection:
                    query_text_feedback = f"masterplanner feedback report intent {first_attempt_nlu_output.get('intent','general')}"
@@ -424,10 +443,10 @@ class TerminusOrchestrator:
                f"Available agents:\n{self.get_agent_capabilities_description()}\n\n"
                f"NLU Analysis of current request: {nlu_summary_for_prompt}\n\n"
                f"Consider conversation history (if any):\n{history_str if history_str else 'No relevant history.'}\n\n"
-               f"Consider Knowledge Base context (if any, including general docs, past plan logs, feedback reports, and their extracted keywords/topics):\n{full_kb_ctx if full_kb_ctx else 'No KB context found.'}\n\n" # MODIFIED TO INCLUDE FEEDBACK/TOPICS
+               f"Consider Knowledge Base context (if any, including general docs, past plan logs, Insights from Feedback Analysis Reports, and any listed 'Extracted Keywords' or 'Extracted Topics' from these items):\n{full_kb_ctx if full_kb_ctx else 'No KB context found.'}\n\n"
                f"User Request: '{user_prompt}'\n\n"
                f"Output ONLY the JSON plan. Use 'parallel_group' for independent sub-steps. Reference outputs via {{{{var_name}}}}. "
-               f"Leverage KB context, NLU, history, and especially feedback insights and extracted topics/keywords to create an optimal, robust plan. " # MODIFIED
+               f"Leverage KB context, NLU, history, and especially feedback insights, extracted keywords, or extracted topics to create an optimal, robust plan. "
                f"If task is simple, return empty list []."
            )
            if current_attempt > 1: # Revision prompt
