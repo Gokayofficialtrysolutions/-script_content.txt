@@ -354,24 +354,220 @@ def main():
            else:
                st.warning("Please enter an image description.")
 
-   elif operation_mode == "Video Processing": # Assuming methods exist in orchestrator
+   elif operation_mode == "Video Processing":
        st.subheader("🎞️ VIDEO PROCESSING UTILITIES")
-       # ... (UI for video tasks: get_video_metadata, extract_video_frame, convert_video_to_gif) ...
-       # This section would be similar to the one in the user's provided script, calling orchestrator methods.
-       # For brevity, detailed UI for this is omitted here but would follow the pattern.
-       st.info("Video processing UI placeholder. Refer to the full script for detailed implementation.")
 
+       uploaded_video = st.file_uploader("Upload a video file", type=["mp4", "mov", "avi", "mkv"], key="video_uploader")
 
-   elif operation_mode == "Audio Processing": # Assuming methods exist in orchestrator
+       if uploaded_video is not None:
+           # Save uploaded video to a temporary path as orchestrator methods expect paths
+           temp_dir = Path(orchestrator.video_processing_dir) / "temp_uploads"
+           temp_dir.mkdir(parents=True, exist_ok=True)
+           temp_video_path = temp_dir / uploaded_video.name
+
+           with open(temp_video_path, "wb") as f:
+               f.write(uploaded_video.getbuffer())
+
+           st.video(str(temp_video_path))
+
+           st.markdown("---")
+           st.subheader("Get Video Metadata")
+           if st.button("Extract Metadata", key="video_meta_button"):
+               with st.spinner("Extracting video metadata..."):
+                   result = asyncio.run(orchestrator.get_video_metadata(str(temp_video_path)))
+                   if result.get("status") == "success":
+                       st.json(result.get("metadata"))
+                       display_feedback_widgets(f"meta_{uploaded_video.name}", "video_metadata_result", f"meta_{uploaded_video.name}_fb", operation_mode)
+                   else:
+                       st.error(f"Failed to get metadata: {result.get('message')}")
+
+           st.markdown("---")
+           st.subheader("Extract Frame")
+           extract_ts = st.text_input("Timestamp for frame (e.g., 00:00:05 or 5.0)", key="video_extract_ts")
+           if st.button("Extract Frame", key="video_extract_frame_button"):
+               if extract_ts:
+                   with st.spinner("Extracting frame..."):
+                       result = asyncio.run(orchestrator.extract_video_frame(str(temp_video_path), extract_ts))
+                       if result.get("status") == "success" and result.get("frame_path"):
+                           st.image(result.get("frame_path"), caption=f"Frame at {extract_ts}")
+                           st.success(f"Frame saved to: {result.get('frame_path')}")
+                           display_feedback_widgets(f"frame_{uploaded_video.name}_{extract_ts}", "video_frame_extraction_result", f"frame_{uploaded_video.name}_{extract_ts}_fb", operation_mode)
+                       else:
+                           st.error(f"Failed to extract frame: {result.get('message')}")
+               else:
+                   st.warning("Please enter a timestamp.")
+
+           st.markdown("---")
+           st.subheader("Convert to GIF")
+           gif_start_ts = st.text_input("GIF Start Timestamp (e.g., 00:00:03 or 3.0)", key="video_gif_start_ts")
+           gif_end_ts = st.text_input("GIF End Timestamp (e.g., 00:00:08 or 8.0)", key="video_gif_end_ts")
+           # gif_scale = st.slider("Resolution Scale", 0.1, 1.0, 0.5, 0.05, key="video_gif_scale") # Optional
+           # gif_fps = st.number_input("GIF FPS", 1, 30, 10, key="video_gif_fps") # Optional
+
+           if st.button("Convert to GIF", key="video_convert_gif_button"):
+               if gif_start_ts and gif_end_ts:
+                   with st.spinner("Converting to GIF..."):
+                       # Using default scale and fps for simplicity in this step
+                       result = asyncio.run(orchestrator.convert_video_to_gif(str(temp_video_path), gif_start_ts, gif_end_ts))
+                       if result.get("status") == "success" and result.get("gif_path"):
+                           st.image(result.get("gif_path"), caption=f"GIF from {gif_start_ts} to {gif_end_ts}")
+                           st.success(f"GIF saved to: {result.get('gif_path')}")
+                           display_feedback_widgets(f"gif_{uploaded_video.name}_{gif_start_ts}_{gif_end_ts}", "video_gif_conversion_result", f"gif_{uploaded_video.name}_{gif_start_ts}_{gif_end_ts}_fb", operation_mode)
+                       else:
+                           st.error(f"Failed to convert to GIF: {result.get('message')}")
+               else:
+                   st.warning("Please enter both start and end timestamps for GIF conversion.")
+
+           # Clean up temp file after processing for this session (or manage more robustly if needed)
+           # For now, simple removal. This means re-upload is needed for new operations on same video.
+           # Consider leaving it and having a clear button or session-based cleanup.
+           # For simplicity, let's assume it's fine for now.
+           # if temp_video_path.exists():
+           #     temp_video_path.unlink()
+
+   elif operation_mode == "Audio Processing":
        st.subheader("🎤 AUDIO PROCESSING SUITE")
-       # ... (UI for audio tasks: get_audio_info, convert_audio_format, text_to_speech) ...
-       st.info("Audio processing UI placeholder.")
 
-   elif operation_mode == "Code Generation": # Assuming methods exist in orchestrator
+       audio_task = st.radio("Select Audio Task:",
+                             ("Get Audio Info", "Convert Audio Format", "Text-to-Speech"),
+                             key="audio_task_radio")
+
+       if audio_task == "Text-to-Speech":
+           st.markdown("---")
+           tts_text = st.text_area("Text to convert to speech:", key="tts_text_input", height=150)
+           tts_filename_stem = st.text_input("Output filename stem (optional):", value="speech_output", key="tts_filename_stem")
+           if st.button("Generate Speech", key="tts_generate_button"):
+               if tts_text.strip():
+                   with st.spinner("Generating speech..."):
+                       result = asyncio.run(orchestrator.text_to_speech(tts_text, tts_filename_stem))
+                       if result.get("status") == "success" and result.get("speech_path"):
+                           st.audio(result.get("speech_path"), format='audio/mp3')
+                           st.success(f"Speech saved to: {result.get('speech_path')}")
+                           display_feedback_widgets(f"tts_{tts_filename_stem}", "tts_result", f"tts_{tts_filename_stem}_fb", operation_mode, tts_text[:100])
+                       else:
+                           st.error(f"Failed to generate speech: {result.get('message')}")
+               else:
+                   st.warning("Please enter text for speech conversion.")
+       else: # Get Audio Info or Convert Audio Format
+           st.markdown("---")
+           uploaded_audio = st.file_uploader("Upload an audio file", type=["mp3", "wav", "ogg", "flac", "aac", "m4a"], key="audio_uploader")
+           if uploaded_audio is not None:
+               # Save uploaded audio to a temporary path
+               temp_audio_dir = Path(orchestrator.audio_processing_dir) / "temp_uploads"
+               temp_audio_dir.mkdir(parents=True, exist_ok=True)
+               temp_audio_path = temp_audio_dir / uploaded_audio.name
+               with open(temp_audio_path, "wb") as f:
+                   f.write(uploaded_audio.getbuffer())
+
+               st.audio(str(temp_audio_path))
+
+               if audio_task == "Get Audio Info":
+                   st.markdown("---")
+                   if st.button("Get Audio Info", key="audio_info_button"):
+                       with st.spinner("Extracting audio information..."):
+                           result = asyncio.run(orchestrator.get_audio_info(str(temp_audio_path)))
+                           if result.get("status") == "success":
+                               st.json(result.get("info"))
+                               display_feedback_widgets(f"info_{uploaded_audio.name}", "audio_info_result", f"info_{uploaded_audio.name}_fb", operation_mode)
+                           else:
+                               st.error(f"Failed to get audio info: {result.get('message')}")
+
+               elif audio_task == "Convert Audio Format":
+                   st.markdown("---")
+                   target_format = st.selectbox("Target Format:", ["mp3", "wav", "ogg", "flac"], key="audio_convert_format_select")
+                   if st.button("Convert Format", key="audio_convert_button"):
+                       with st.spinner(f"Converting to {target_format}..."):
+                           result = asyncio.run(orchestrator.convert_audio_format(str(temp_audio_path), target_format))
+                           if result.get("status") == "success" and result.get("output_path"):
+                               st.success(f"Converted audio saved to: {result.get('output_path')}")
+                               try: # Attempt to display the converted audio
+                                   st.audio(result.get("output_path"))
+                               except Exception as e_audio_display:
+                                   st.warning(f"Could not display converted audio directly: {e_audio_display}. Please check the file at the path provided.")
+                               display_feedback_widgets(f"convert_{uploaded_audio.name}_{target_format}", "audio_conversion_result", f"convert_{uploaded_audio.name}_{target_format}_fb", operation_mode)
+                           else:
+                               st.error(f"Failed to convert audio: {result.get('message')}")
+
+               # Consider temp file cleanup logic here or at session end
+               # if temp_audio_path.exists():
+               #     temp_audio_path.unlink()
+   elif operation_mode == "Code Generation":
        st.subheader("💻 PROJECT SCAFFOLDING & CODE GENERATION")
-       # ... (UI for scaffolding, AI code modification, explanation, module generation) ...
-       st.info("Code generation UI placeholder.")
 
+       code_task = st.selectbox("Select Code Task:",
+                                ["Scaffold New Project", "Explain Code Snippet", "Generate Code Module/Class"],
+                                key="code_task_select")
+
+       if code_task == "Scaffold New Project":
+           st.markdown("---")
+           st.write("Scaffold a new project structure using AutoDev.")
+           project_name = st.text_input("Project Name:", key="scaffold_project_name")
+           project_type_options = ["python_cli", "streamlit_dashboard", "nodejs_api"] # Add more as AutoDev supports them
+           project_type = st.selectbox("Project Type:", project_type_options, key="scaffold_project_type")
+
+           if st.button("Scaffold Project", key="scaffold_project_button"):
+               if project_name and project_type:
+                   with st.spinner(f"Scaffolding '{project_name}' ({project_type})..."):
+                       # This call is synchronous in the current auto_dev.py, but orchestrator method is async
+                       result = asyncio.run(orchestrator.scaffold_new_project(project_name, project_type))
+                       if result.get("status") == "success":
+                           st.success(result.get("message"))
+                           display_feedback_widgets(f"scaffold_{project_name}", "project_scaffolding_result", f"scaffold_{project_name}_fb", operation_mode, f"Scaffold: {project_name} ({project_type})")
+                       else:
+                           st.error(f"Failed to scaffold project: {result.get('message')}")
+               else:
+                   st.warning("Please provide both project name and type.")
+
+       elif code_task == "Explain Code Snippet":
+           st.markdown("---")
+           st.write("Get an AI-powered explanation for a code snippet.")
+           code_snippet_explain = st.text_area("Code Snippet to Explain:", height=200, key="explain_code_snippet_input")
+           # language_explain = st.text_input("Language (e.g., python, javascript):", value="python", key="explain_code_language") # Optional: make it a selectbox
+
+           if st.button("Explain Snippet", key="explain_snippet_button"):
+               if code_snippet_explain.strip():
+                   with st.spinner("Generating explanation..."):
+                       # Assuming orchestrator.explain_code_snippet exists and handles language if needed
+                       result = asyncio.run(orchestrator.explain_code_snippet(code_snippet_explain)) # Add language if method supports
+                       if result.get("status") == "success":
+                           st.markdown("**Explanation:**")
+                           st.markdown(result.get("explanation"))
+                           display_feedback_widgets(f"explain_{hash(code_snippet_explain)}", "code_explanation_result", f"explain_{hash(code_snippet_explain)}_fb", operation_mode, code_snippet_explain[:100])
+                       else:
+                           st.error(f"Failed to get explanation: {result.get('message')}")
+               else:
+                   st.warning("Please enter a code snippet to explain.")
+
+       elif code_task == "Generate Code Module/Class":
+           st.markdown("---")
+           st.write("Generate a new code module or class based on requirements.")
+           requirements_generate = st.text_area("Requirements/Description for the module/class:", height=150, key="generate_module_requirements")
+           # language_generate = st.text_input("Language (e.g., python):", value="python", key="generate_module_language") # Optional
+
+           if st.button("Generate Module", key="generate_module_button"):
+               if requirements_generate.strip():
+                   with st.spinner("Generating code module..."):
+                       # Assuming orchestrator.generate_code_module exists
+                       result = asyncio.run(orchestrator.generate_code_module(requirements_generate)) # Add language if method supports
+                       if result.get("status") == "success":
+                           st.markdown("**Generated Code:**")
+                           st.code(result.get("generated_code"), language="python") # Assume python for now, or use language_generate
+                           display_feedback_widgets(f"genmodule_{hash(requirements_generate)}", "code_module_generation_result", f"genmodule_{hash(requirements_generate)}_fb", operation_mode, requirements_generate[:100])
+                       else:
+                           st.error(f"Failed to generate module: {result.get('message')}")
+               else:
+                   st.warning("Please provide requirements for the module.")
+
+       # Placeholder for "AI-Assisted Code Modification" - to be implemented if desired
+       # st.markdown("---")
+       # st.subheader("AI-Assisted Code Modification (Experimental)")
+       # st.info("This feature is experimental. Always review changes carefully.")
+       # modify_project_name = st.text_input("Project Name (must exist in AutoDev projects folder):", key="modify_project_name")
+       # modify_file_path = st.text_input("Relative Path to File (e.g., src/main.py):", key="modify_file_path")
+       # modify_instruction = st.text_area("Modification Instruction:", height=100, key="modify_instruction")
+       # if st.button("Attempt Code Modification", key="modify_code_button"):
+       #     # ... call orchestrator.modify_code_in_project ...
+       #     pass
    elif operation_mode == "System Information":
        st.subheader("📊 SYSTEM INFORMATION DASHBOARD")
        sys_admin_agent = next((a for a in orchestrator.agents if a.name == "SystemAdmin" and a.active), None)
