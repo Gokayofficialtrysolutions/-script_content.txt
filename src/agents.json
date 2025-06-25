@@ -3,54 +3,63 @@
     "name": "MasterPlanner",
     "model": "ollama/mixtral",
     "specialty": "Complex task decomposition, planning, and orchestration. Uses NLU, KB context (including topics & feedback), and conversation history to generate multi-step execution plans for other agents.",
-    "active": true
+    "active": true,
+    "estimated_complexity": "high"
   },
   {
     "name": "ContentAnalysisAgent",
     "model": "ollama/mistral",
     "specialty": "Analyzes text content from the Knowledge Base to extract keywords and topics. Expects content and returns a JSON with 'keywords' and 'topics'.",
-    "active": true
+    "active": true,
+    "estimated_complexity": "medium"
   },
   {
     "name": "SystemAdmin",
     "model": "ollama/mistral",
     "specialty": "Provides system information (OS, CPU, memory, disk, network, top processes). Accepts descriptive prompts like 'get os info', 'top 5 processes'.",
-    "active": true
+    "active": true,
+    "estimated_complexity": "low"
   },
   {
     "name": "ImageForge",
     "model": "stabilityai/stable-diffusion-xl-base-1.0",
     "specialty": "Generates images from text prompts using diffusion models. Manages image saving.",
-    "active": true
+    "active": true,
+    "estimated_complexity": "high"
   },
   {
     "name": "WebCrawler",
     "model": "ollama/mistral",
     "specialty": "Scrapes web page content given a URL, optionally summarizes it, and stores results in the Knowledge Base. Also supports general web search queries via external tools (details managed by orchestrator).",
-    "active": true
+    "active": true,
+    "estimated_complexity": "medium"
   },
   {
     "name": "CodeMaster",
     "model": "ollama/codellama",
     "specialty": "Handles code-related tasks: explaining code snippets, generating new code modules/classes, and experimental AI-assisted code modification in projects. Stores outputs in KB.",
-    "active": true
+    "active": true,
+    "estimated_complexity": "high"
   },
   {
     "name": "AudioMaestro",
     "model": "ollama/mistral",
     "specialty": "Processes audio files: retrieves information, converts formats, and performs text-to-speech (TTS).",
-    "active": true
+    "active": true,
+    "estimated_complexity": "low"
   },
   {
     "name": "DocSummarizer",
     "model": "ollama/mistral",
     "specialty": "Summarizes text content, often used internally by other agents like WebCrawler or for document processing tasks.",
-    "active": true
+    "active": true,
+    "estimated_complexity": "medium"
   },
   {
     "name": "GeneralPurposeAgent",
     "model": "ollama/mistral",
     "specialty": "A general-purpose agent for tasks not covered by specialized agents, such as simple Q&A or text generation.",
-    "active": true
+    "active": true,
+    "estimated_complexity": "low"
   }
 ]

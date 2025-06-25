@@ -33,7 +33,11 @@ from collections import defaultdict
 
 @dataclass
 class Agent:
-   name:str;model:str;specialty:str;active:bool=True
+   name:str
+   model:str
+   specialty:str
+   active:bool=True
+   estimated_complexity:Optional[str]=None # E.g., "low", "medium", "high"
 
 class TerminusOrchestrator:
    def __init__(self):
@@ -117,8 +121,11 @@ class TerminusOrchestrator:
        print("TerminusOrchestrator initialized.")
 
    def get_agent_capabilities_description(self) -> str:
-       # ... (implementation as before) ...
-       descriptions = [f"- {a.name}: Specializes in '{a.specialty}'. Uses model: {a.model}." for a in self.agents if a.active]
+       descriptions = []
+       for a in self.agents:
+           if a.active:
+               complexity_info = f" (Complexity: {a.estimated_complexity})" if a.estimated_complexity else ""
+               descriptions.append(f"- {a.name}: Specializes in '{a.specialty}'. Uses model: {a.model}.{complexity_info}")
        return "\n".join(descriptions) if descriptions else "No active agents available."
 
    async def _handle_system_event(self, message: Dict):
@@ -447,6 +454,7 @@ class TerminusOrchestrator:
                f"User Request: '{user_prompt}'\n\n"
                f"Output ONLY the JSON plan. Use 'parallel_group' for independent sub-steps. Reference outputs via {{{{var_name}}}}. "
                f"Leverage KB context, NLU, history, and especially feedback insights, extracted keywords, or extracted topics to create an optimal, robust plan. "
+               f"Consider agent 'Complexity' ratings: favor lower complexity agents for simple tasks and consider breaking down tasks requiring high complexity agents into smaller steps if feasible. "
                f"If task is simple, return empty list []."
            )
            if current_attempt > 1: # Revision prompt
@@ -455,8 +463,9 @@ class TerminusOrchestrator:
                     f"Original User Request: '{user_prompt}'\n"
                     f"NLU Analysis: {nlu_summary_for_prompt}\n"
                     f"Failure Context:\n{json.dumps(detailed_failure_ctx_for_rev, indent=2)}\n\n"
-                    f"Available Agents:\n{self.get_agent_capabilities_description()}\n\n"
-                    f"Output ONLY revised JSON plan. Make minimal targeted changes. Leverage all context."
+                    f"Available Agents (Note Complexity Ratings):\n{self.get_agent_capabilities_description()}\n\n"
+                    f"Output ONLY revised JSON plan. Make minimal targeted changes. Leverage all context, including agent complexity. "
+                    f"Consider if a different agent or breaking down the failed step (if high complexity) is appropriate."
                 )
 
            print(f"{plan_handler_id} INFO: Prompting MasterPlanner LLM (Attempt {current_attempt}).")
