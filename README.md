@@ -72,7 +72,9 @@ Select agents, adjust parameters like temperature, and input your queries or tas
 ## Configuration
 
 *   **Models (`models.conf`):** Located in `~/.terminus-ai/models.conf`. This file defines which Ollama models are available for download and allows you to specify core models or a full set.
-*   **Agents (`agents.json`):** Located in `~/.terminus-ai/agents.json`. This file configures the available AI agents, their models, specialties, and active status. You can customize this file to add new agents or modify existing ones.
+*   **Agents (`agents.json`):**
+    *   **Production:** Located in `~/.terminus-ai/agents.json` after installation. This file configures the available AI agents, their models, specialties, and active status. You can customize this file to add new agents or modify existing ones.
+    *   **Development:** A default `src/agents.json` is provided in the source repository. This allows the application to run with a predefined set of agents when executed directly from the source tree (e.g., for development or testing). The installer script is responsible for handling the `agents.json` file in the production installation directory (`~/.terminus-ai`).
 
 ## Note on Dependencies
 The project uses version-pinned Python dependencies listed in `core_requirements.txt`, `frameworks_requirements.txt`, `utils_requirements.txt`, and `dev_requirements.txt`. All dependencies are pinned to specific, stable versions to ensure stability and reproducibility of the environment.
