@@ -61,5 +61,12 @@
     "specialty": "A general-purpose agent for tasks not covered by specialized agents, such as simple Q&A or text generation.",
     "active": true,
     "estimated_complexity": "low"
+  },
+  {
+    "name": "NLUAnalysisAgent",
+    "model": "ollama/mistral",
+    "specialty": "Natural Language Understanding: Performs intent classification against a provided list of candidate intents, and extracts named entities from a given text. Returns results in a structured JSON format.",
+    "active": true,
+    "estimated_complexity": "medium"
   }
 ]
