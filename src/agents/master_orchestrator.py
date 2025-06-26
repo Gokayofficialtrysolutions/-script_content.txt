@@ -344,8 +344,8 @@ class TerminusOrchestrator:
    def get_conversation_history_for_display(self) -> List[Dict]:
        return list(self.conversation_history)
 
-   async def execute_master_plan(self, user_prompt: str) -> List[Dict]:
-       plan_handler_id = f"[MasterPlanner user_prompt:'{user_prompt[:50]}...']"
+   async def execute_master_plan(self, user_prompt: str, request_priority: Optional[str] = "normal") -> List[Dict]:
+       plan_handler_id = f"[MasterPlanner user_prompt:'{user_prompt[:50]}...' Priority:'{request_priority}']"
        print(f"{plan_handler_id} START: Received request.")
        self.conversation_history.append({"role": "user", "content": user_prompt})
        if len(self.conversation_history) > self.max_history_items: self.conversation_history = self.conversation_history[-self.max_history_items:]
