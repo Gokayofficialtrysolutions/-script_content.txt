@@ -221,11 +221,10 @@ This document summarizes the major phases, key features implemented, and signifi
     *   **Python File Externalization:**
         *   The complete Python code for `master_orchestrator.py` (including all previously developed features and conceptual enhancements for topic/feedback utilization by MasterPlanner, improved logging, and validation logic) was extracted and saved to a new dedicated file: `src/agents/master_orchestrator.py`.
         *   The complete Python code for `terminus_ui.py` was extracted and saved to a new dedicated file: `src/terminus_ui.py`.
-    *   **Installer Script Modification (Conceptual - Documented for Manual Application):**
-        *   The `create_agent_orchestration_script` function in `updated_terminus_installer.sh` was conceptually redesigned. The heredoc embedding `master_orchestrator.py` code is to be removed and replaced with bash commands to copy `src/agents/master_orchestrator.py` from the source distribution to `$INSTALL_DIR/agents/`.
-        *   The `create_terminus_ui_script` function in `updated_terminus_installer.sh` was conceptually redesigned. The heredoc embedding `terminus_ui.py` code is to be removed and replaced with bash commands to copy `src/terminus_ui.py` from the source distribution to `$INSTALL_DIR/`.
-    *   **Note on Installer Script Changes:** Initial automated modification of `updated_terminus_installer.sh` to implement these `cp` command replacements was deferred due to tool limitations. It's assumed these bash changes were manually applied before proceeding with direct Python file modifications in subsequent phases.
-    *   **Benefit:** This refactoring, once the bash script is manually updated, will allow future Python code changes to be made directly to the `.py` files, which is a more standard and robust development practice.
+    *   **Installer Script Modification:**
+        *   The `updated_terminus_installer.sh` script was modified (during `fix/installer-source-alignment`) to replace heredoc embeddings of `master_orchestrator.py` and `terminus_ui.py` with bash commands that copy these files from `src/` to their respective locations in `$INSTALL_DIR`.
+        *   The installer's handling of `agents.json` was subsequently updated (during `fix/unify-agents-config`) to also copy `src/agents.json` instead of using a heredoc.
+    *   **Benefit:** This refactoring allows Python code changes to be made directly to the `.py` source files and `agents.json` to be the single source of truth, improving maintainability and standardizing the development workflow.
 
 ## Phase 18: Application of Deferred Enhancements to Externalized Python Code
 *   **Objective:** Implement previously documented conceptual enhancements directly into the newly separated Python source files (`src/agents/master_orchestrator.py`).

@@ -39,9 +39,9 @@ Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for po
 *   Sufficient disk space (min. 100GB recommended for multiple models).
 
 ### Running the Installer
-1.  Ensure you have the installer script (e.g., `script_content.txt` or a named `.sh` file).
-2.  Make it executable: `chmod +x your_script_name.sh`
-3.  Run the installer: `bash your_script_name.sh`
+1.  Ensure you have the installer script, which is named `updated_terminus_installer.sh` in the root of this repository.
+2.  Make it executable: `chmod +x updated_terminus_installer.sh`
+3.  Run the installer from the root of the repository: `bash updated_terminus_installer.sh`
 
 The main installation directory will be `~/.terminus-ai`. All logs and generated files will be stored there.
 
