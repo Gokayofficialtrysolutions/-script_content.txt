@@ -261,108 +261,17 @@ pull_ollama_models() {
 
 # Function for generating master_orchestrator.py
 create_agent_orchestration_script() {
-    progress "CREATING AGENT CONFIGURATION FILE (agents.json)"
-    cat>"$INSTALL_DIR/agents.json"<<'AGENTS_EOF'
-[
-  {
-    "name": "DeepThink",
-    "model": "deepseek-r1:32b",
-    "specialty": "Advanced Reasoning & Logic",
-    "active": true
-  },
-  {
-    "name": "MasterPlanner",
-    "model": "mixtral:8x22b",
-    "specialty": "Complex Task Planning and Decomposition into Agent Steps. Output ONLY JSON plans.",
-    "active": true
-  },
-  {
-    "name": "CodeMaster",
-    "model": "deepseek-coder-v2:16b",
-    "specialty": "Programming & Development",
-    "active": true
-  },
-  {
-    "name": "DataWizard",
-    "model": "qwen2.5:72b",
-    "specialty": "Data Analysis & Processing",
-    "active": true
-  },
-  {
-    "name": "WebCrawler",
-    "model": "dolphin-mixtral:8x7b",
-    "specialty": "Web Research & Intelligence",
-    "active": true
-  },
-  {
-    "name": "DocProcessor",
-    "model": "llama3.1:70b",
-    "specialty": "Document Analysis & Generation",
-    "active": true
-  },
-  {
-    "name": "VisionAI",
-    "model": "llava:34b",
-    "specialty": "Image & Visual Processing",
-    "active": true
-  },
-  {
-    "name": "MathGenius",
-    "model": "deepseek-math:7b",
-    "specialty": "Mathematical Computations",
-    "active": true
-  },
-  {
-    "name": "CreativeWriter",
-    "model": "nous-hermes2:34b",
-    "specialty": "Creative Content Generation",
-    "active": true
-  },
-  {
-    "name": "SystemAdmin",
-    "model": "codellama:34b",
-    "specialty": "System Administration",
-    "active": true
-  },
-  {
-    "name": "SecurityExpert",
-    "model": "mixtral:8x22b",
-    "specialty": "Cybersecurity Analysis",
-    "active": true
-  },
-  {
-    "name": "ResearchBot",
-    "model": "yi:34b",
-    "specialty": "Scientific Research",
-    "active": true
-  },
-  {
-    "name": "MultiLang",
-    "model": "qwen2.5-coder:32b",
-    "specialty": "Multilingual Processing",
-    "active": true
-  },
-  {
-    "name": "ImageForge",
-    "model": "diffusers/stable-diffusion-xl-base-1.0",
-    "specialty": "Image Generation",
-    "active": true
-  },
-  {
-    "name": "AudioMaestro",
-    "model": "pydub/pyttsx3",
-    "specialty": "Audio Processing & TTS",
-    "active": true
-  },
-  {
-    "name": "ContentAnalysisAgent",
-    "model": "llama3.1:70b",
-    "specialty": "Performs deeper analysis of text content (e.g., keyword extraction, topic modeling) to enrich knowledge base entries. Often triggered by system events.",
-    "active": true
-  }
-]
-AGENTS_EOF
-    echo "Created agents.json in $INSTALL_DIR" | tee -a "$LOG"
+    progress "CONFIGURING AGENTS (agents.json)"
+    # Ensure the target directory for agents.json exists (it should from initialize_setup)
+    mkdir -p "$INSTALL_DIR"
+    if [ -f "$SCRIPT_DIR/src/agents.json" ]; then
+        cp "$SCRIPT_DIR/src/agents.json" "$INSTALL_DIR/agents.json"
+        echo "Copied src/agents.json to $INSTALL_DIR/agents.json" | tee -a "$LOG"
+    else
+        echo "ERROR: Source file src/agents.json not found in $SCRIPT_DIR. Agent configuration cannot be deployed." | tee -a "$LOG"
+        # This is a critical failure, as the system relies on this file.
+        exit 1
+    fi
 
     progress "DEPLOYING AGENT ORCHESTRATION SCRIPT (master_orchestrator.py)"
     # Ensure the target directory exists

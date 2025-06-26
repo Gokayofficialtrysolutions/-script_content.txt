@@ -1,21 +1,21 @@
 [
   {
     "name": "MasterPlanner",
-    "model": "ollama/mixtral",
+    "model": "ollama/mixtral:8x22b",
     "specialty": "Complex task decomposition, planning, and orchestration. Uses NLU, KB context (including topics & feedback), and conversation history to generate multi-step execution plans for other agents.",
     "active": true,
     "estimated_complexity": "high"
   },
   {
     "name": "ContentAnalysisAgent",
-    "model": "ollama/mistral",
-    "specialty": "Analyzes text content from the Knowledge Base to extract keywords and topics. Expects content and returns a JSON with 'keywords' and 'topics'.",
+    "model": "ollama/llama3.1:70b",
+    "specialty": "Analyzes text content from the Knowledge Base to extract keywords and topics. Expects content and returns a JSON with 'keywords' and 'topics'. Can also perform deeper analysis to enrich knowledge base entries.",
     "active": true,
     "estimated_complexity": "medium"
   },
   {
     "name": "SystemAdmin",
-    "model": "ollama/mistral",
+    "model": "ollama/codellama:34b",
     "specialty": "Provides system information (OS, CPU, memory, disk, network, top processes). Accepts descriptive prompts like 'get os info', 'top 5 processes'.",
     "active": true,
     "estimated_complexity": "low"
@@ -29,15 +29,15 @@
   },
   {
     "name": "WebCrawler",
-    "model": "ollama/mistral",
-    "specialty": "Scrapes web page content given a URL, optionally summarizes it, and stores results in the Knowledge Base. Also supports general web search queries via external tools (details managed by orchestrator).",
+    "model": "ollama/dolphin-mixtral:8x7b",
+    "specialty": "Scrapes web page content given a URL, optionally summarizes it, and stores results in the Knowledge Base. Also supports general web search queries via external tools (details managed by orchestrator). Handles web research and intelligence.",
     "active": true,
     "estimated_complexity": "medium"
   },
   {
     "name": "CodeMaster",
-    "model": "ollama/codellama",
-    "specialty": "Handles code-related tasks: explaining code snippets, generating new code modules/classes, and experimental AI-assisted code modification in projects. Stores outputs in KB.",
+    "model": "ollama/deepseek-coder-v2:16b",
+    "specialty": "Handles code-related tasks: explaining code snippets, generating new code modules/classes, and experimental AI-assisted code modification in projects. Stores outputs in KB. Specialized in Programming & Development.",
     "active": true,
     "estimated_complexity": "high"
   },
@@ -66,6 +66,69 @@
     "name": "NLUAnalysisAgent",
     "model": "ollama/mistral",
     "specialty": "Natural Language Understanding: Performs intent classification against a provided list of candidate intents, and extracts named entities from a given text. Returns results in a structured JSON format.",
+    "active": true,
+    "estimated_complexity": "medium"
+  },
+  {
+    "name": "DeepThink",
+    "model": "ollama/deepseek-r1:32b",
+    "specialty": "Advanced Reasoning & Logic",
+    "active": true,
+    "estimated_complexity": "high"
+  },
+  {
+    "name": "DataWizard",
+    "model": "ollama/qwen2.5:72b",
+    "specialty": "Data Analysis & Processing",
+    "active": true,
+    "estimated_complexity": "high"
+  },
+  {
+    "name": "DocProcessor",
+    "model": "ollama/llama3.1:70b",
+    "specialty": "Document Analysis & Generation (potentially more comprehensive than summarization)",
+    "active": true,
+    "estimated_complexity": "high"
+  },
+  {
+    "name": "VisionAI",
+    "model": "ollama/llava:34b",
+    "specialty": "Image & Visual Processing (distinct from ImageForge which is generation-focused)",
+    "active": true,
+    "estimated_complexity": "high"
+  },
+  {
+    "name": "MathGenius",
+    "model": "ollama/deepseek-math:7b",
+    "specialty": "Mathematical Computations",
+    "active": true,
+    "estimated_complexity": "medium"
+  },
+  {
+    "name": "CreativeWriter",
+    "model": "ollama/nous-hermes2:34b",
+    "specialty": "Creative Content Generation",
+    "active": true,
+    "estimated_complexity": "medium"
+  },
+  {
+    "name": "SecurityExpert",
+    "model": "ollama/mixtral:8x22b",
+    "specialty": "Cybersecurity Analysis",
+    "active": true,
+    "estimated_complexity": "high"
+  },
+  {
+    "name": "ResearchBot",
+    "model": "ollama/yi:34b",
+    "specialty": "Scientific Research",
+    "active": true,
+    "estimated_complexity": "high"
+  },
+  {
+    "name": "MultiLang",
+    "model": "ollama/qwen2.5-coder:32b",
+    "specialty": "Multilingual Processing",
     "active": true,
     "estimated_complexity": "medium"
   }
