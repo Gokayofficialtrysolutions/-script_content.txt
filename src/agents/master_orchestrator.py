@@ -43,12 +43,27 @@ from ..core import prompt_constructors
 from ..core.rl_logger import RLExperienceLogger
 
 
+# --- New/Modified Dataclasses for Service Definitions ---
 @dataclass
-class AgentServiceDefinition: # For future use in advertising agent capabilities
+class AgentServiceParameter:
+    name: str
+    type: str  # e.g., "string", "integer", "float", "boolean", "list[string]", "dict"
+    required: bool
+    description: str
+    default_value: Optional[Any] = None
+
+@dataclass
+class AgentServiceReturn:
+    type: str # e.g., "string", "integer", "dict", "list[CustomObject]"
+    description: str
+
+@dataclass
+class AgentServiceDefinition:
     name: str
     description: str
-    parameters: Dict[str, Dict[str, Any]]
-    returns: Dict[str, Any]
+    parameters: List[AgentServiceParameter]
+    returns: AgentServiceReturn
+    handler_method_name: Optional[str] = None
 
 @dataclass
 class Agent:
@@ -57,12 +72,16 @@ class Agent:
    specialty:str
    active:bool=True
    estimated_complexity:Optional[str]=None
-   provided_services: List[AgentServiceDefinition] = field(default_factory=list)
+   # `provided_services` is read from JSON but not stored on the Agent object itself.
+   # It's processed by the orchestrator into self.service_definitions.
 
 
 class TerminusOrchestrator:
    def __init__(self):
-       self.agents = []
+       self.agents: List[Agent] = []
+       self.service_definitions: Dict[Tuple[str, str], AgentServiceDefinition] = {}
+       self.service_handlers: Dict[Tuple[str, str], Callable[..., Coroutine[Any, Any, Dict]]] = {} # Type hint for async handler
+
        self.install_dir = Path(__file__).resolve().parent.parent
        self.agents_config_path = self.install_dir / "agents.json"
        self.models_config_path = self.install_dir / "models.conf"
@@ -82,14 +101,56 @@ class TerminusOrchestrator:
            dir_path.mkdir(parents=True, exist_ok=True)
 
        try:
-           with open(self.agents_config_path, 'r') as f:
-               agents_data = json.load(f)
-           for agent_config in agents_data:
-               services_data = agent_config.pop("provided_services", [])
-               agent_instance = Agent(**agent_config)
+           with open(self.agents_config_path, 'r', encoding='utf-8') as f:
+               agents_data_raw = json.load(f)
+
+           for agent_config_raw in agents_data_raw:
+               # Separate provided_services from other agent fields
+               provided_services_raw = agent_config_raw.pop("provided_services", [])
+
+               # Create Agent instance without provided_services
+               agent_instance = Agent(**agent_config_raw)
                self.agents.append(agent_instance)
-       except Exception as e:
-           print(f"ERROR loading agents.json: {e}. No agents loaded.")
+
+               # Process and store service definitions
+               for service_def_raw in provided_services_raw:
+                   try:
+                       # Deserialize parameters
+                       params_data = service_def_raw.get("parameters", [])
+                       service_params = [AgentServiceParameter(**p) for p in params_data]
+
+                       # Deserialize returns
+                       returns_data = service_def_raw.get("returns", {})
+                       service_returns = AgentServiceReturn(**returns_data)
+
+                       service_def_obj = AgentServiceDefinition(
+                           name=service_def_raw["name"],
+                           description=service_def_raw["description"],
+                           parameters=service_params,
+                           returns=service_returns,
+                           handler_method_name=service_def_raw.get("handler_method_name")
+                       )
+
+                       service_key = (agent_instance.name, service_def_obj.name)
+                       self.service_definitions[service_key] = service_def_obj
+                       print(f"Loaded service definition: {agent_instance.name} -> {service_def_obj.name}")
+
+                       if service_def_obj.handler_method_name:
+                           handler_method = getattr(self, service_def_obj.handler_method_name, None)
+                           if handler_method and callable(handler_method):
+                               self.service_handlers[service_key] = handler_method
+                               print(f"  Registered direct handler '{service_def_obj.handler_method_name}' for service '{service_def_obj.name}'.")
+                           else:
+                               print(f"  WARNING: Handler method '{service_def_obj.handler_method_name}' for service '{service_def_obj.name}' not found or not callable on orchestrator.")
+                   except Exception as e_service:
+                       print(f"ERROR loading service definition for agent {agent_instance.name}: {service_def_raw.get('name', 'UNKNOWN_SERVICE')}. Details: {e_service}")
+
+       except FileNotFoundError:
+           print(f"CRITICAL ERROR: agents.json not found at {self.agents_config_path}. No agents or services loaded.")
+       except json.JSONDecodeError as e_json:
+           print(f"CRITICAL ERROR: Failed to decode agents.json: {e_json}. No agents or services loaded.")
+       except Exception as e_outer:
+           print(f"CRITICAL ERROR loading agents configuration: {e_outer}. Some agents/services may not be loaded.")
 
        self.ollama_url="http://localhost:11434/api/generate"
        self.image_gen_pipeline = None
@@ -126,11 +187,14 @@ class TerminusOrchestrator:
        self.message_processing_tasks = set()
        self._setup_initial_event_listeners()
 
-       self.service_handlers = {
-           ("CodeMaster", "validate_code_syntax"): self._service_codemaster_validate_syntax
-       }
+       # self.service_handlers is now populated dynamically during agent loading
+       # based on "handler_method_name" in service definitions.
+       # Old static definition:
+       # self.service_handlers = {
+       # ("CodeMaster", "validate_code_syntax"): self._service_codemaster_validate_syntax
+       # }
        self.default_high_priority_retries = 1
-       print("TerminusOrchestrator initialized with service handlers and default high-priority retries.")
+       print(f"TerminusOrchestrator initialized. {len(self.service_handlers)} direct service handlers registered. Default high-priority retries: {self.default_high_priority_retries}.")
 
        self.rl_experience_log_path = self.logs_dir / "rl_experience_log.jsonl"
        self.rl_logger = RLExperienceLogger(self.rl_experience_log_path)
@@ -264,60 +328,202 @@ class TerminusOrchestrator:
         service_name = service_call_step_def.get("service_name")
         service_params_template = service_call_step_def.get("service_params", {})
         output_var_name = service_call_step_def.get("output_variable_name")
-        if not all([target_agent_name, service_name]): return {"step_id": step_id, "status": "error", "response": "Missing target_agent_name or service_name for agent_service_call."}
+
+        if not all([target_agent_name, service_name]):
+            return {"step_id": step_id, "status": "error", "response": "Missing target_agent_name or service_name for agent_service_call.", "data": None, "error_code": "MISSING_SERVICE_INFO"}
+
+        service_key = (target_agent_name, service_name)
+        service_def = self.service_definitions.get(service_key)
+
+        if not service_def:
+            # Fallback for services not formally defined (legacy or dynamic)
+            # This part remains similar to original, but consider if this fallback should be stricter or logged more prominently.
+            print(f"{log_prefix}WARNING: Service definition for '{service_name}' on agent '{target_agent_name}' not found. Proceeding with LLM fallback without formal validation.")
+            # Proceed with LLM fallback as before, but without parameter validation based on a definition.
+            # For brevity, the old parameter resolution and LLM call logic is assumed here if service_def is None.
+            # This section would essentially replicate the old logic path for LLM fallback.
+            # However, for this refactoring, we will prioritize the new structured approach.
+            # If a service is called, it SHOULD have a definition.
+            # For now, let's make it an error if not defined, to enforce the new structure.
+            return {"step_id": step_id, "status": "error", "response": f"Service '{service_name}' on agent '{target_agent_name}' is not defined.", "data": None, "error_code": "SERVICE_NOT_DEFINED"}
+
+        # --- Parameter Resolution, Validation, and Coercion ---
         resolved_params = {}
-        for param_key, param_value_template in service_params_template.items():
-            if isinstance(param_value_template, str):
-                substituted_value = param_value_template
-                for dep_match in re.finditer(r"{{{{([\w.-]+)}}}}", param_value_template):
+        param_validation_errors = []
+
+        for defined_param in service_def.parameters:
+            param_name = defined_param.name
+            raw_value = service_params_template.get(param_name)
+
+            # 1. Resolve from template if it's a string placeholder
+            if isinstance(raw_value, str):
+                substituted_value = raw_value
+                for dep_match in re.finditer(r"{{{{([\w.-]+)}}}}", raw_value):
                     var_path = dep_match.group(1)
                     val_to_sub = current_step_outputs.get(var_path)
                     if '.' in var_path and val_to_sub is None:
-                        base_key = var_path.split('.')[0]
+                        base_key, *attrs = var_path.split('.')
                         if base_key in current_step_outputs:
                             temp_val = current_step_outputs[base_key]
                             try:
-                                for part in var_path.split('.')[1:]:
+                                for part in attrs:
                                     if isinstance(temp_val, dict): temp_val = temp_val.get(part)
+                                    elif isinstance(temp_val, list) and part.isdigit(): temp_val = temp_val[int(part)]
                                     else: temp_val = None; break
                                 if temp_val is not None: val_to_sub = temp_val
                             except: pass
                     if val_to_sub is not None: substituted_value = substituted_value.replace(dep_match.group(0), str(val_to_sub))
-                    else: print(f"Warning: Could not resolve parameter dependency '{var_path}' for service call {step_id}.")
-                resolved_params[param_key] = substituted_value
-            else: resolved_params[param_key] = param_value_template
-        service_handler_key = (target_agent_name, service_name)
-        if service_handler_key in self.service_handlers:
-            handler_method = self.service_handlers[service_handler_key]
-            print(f"{log_prefix}Executing handled service '{service_name}' on agent '{target_agent_name}' with params: {resolved_params}")
-            service_result = await handler_method(resolved_params)
-        else:
-            print(f"{log_prefix}No direct handler for service '{service_name}' on agent '{target_agent_name}'. Using LLM fallback.")
-            target_agent = next((a for a in self.agents if a.name == target_agent_name and a.active), None)
-            if not target_agent: return {"step_id": step_id, "status": "error", "response": f"Target agent '{target_agent_name}' not found or inactive."}
-            fallback_prompt = (f"You are agent '{target_agent_name}'. You need to perform the service called '{service_name}'.\n"
-                               f"The parameters provided for this service are:\n{json.dumps(resolved_params, indent=2)}\n"
-                               f"Based on your capabilities and the service requested, process these parameters and provide a structured JSON response suitable for the service '{service_name}'.")
-            service_result = await self.execute_agent(target_agent, fallback_prompt)
-        final_status = service_result.get("status", "error")
-        if final_status != "success": print(f"{log_prefix}Service call step {step_id} ('{service_name}' on '{target_agent_name}') failed. Status: {final_status}, Response: {str(service_result.get('response'))[:100]}...")
-        else: print(f"{log_prefix}Service call step {step_id} ('{service_name}' on '{target_agent_name}') completed successfully.")
-        if output_var_name and final_status == "success": current_step_outputs[output_var_name] = service_result.get("data", service_result.get("response"))
-        return {"step_id": step_id, "agent_name": f"{target_agent_name} (Service: {service_name})", "status": final_status, "response": service_result.get("response", service_result.get("message", "Service call completed.")), "data": service_result.get("data")}
+                    else: print(f"Warning: Could not resolve template var '{var_path}' for param '{param_name}' in service call {step_id}.")
+                actual_value = substituted_value
+            else: # Value is literal (not a string template) or already resolved
+                actual_value = raw_value
 
-   async def _service_codemaster_validate_syntax(self, params: Dict) -> Dict:
-        code_snippet = params.get("code_snippet"); language = params.get("language", "python")
-        if not code_snippet: return {"status": "error", "message": "No code_snippet provided for validation."}
+            # 2. Handle missing parameters and defaults
+            if actual_value is None: # Parameter not provided in plan step
+                if defined_param.required and defined_param.default_value is None:
+                    param_validation_errors.append(f"Required parameter '{param_name}' is missing.")
+                    continue
+                elif defined_param.default_value is not None:
+                    actual_value = defined_param.default_value
+                    print(f"{log_prefix}INFO: Using default value for param '{param_name}': {actual_value}")
+                elif not defined_param.required: # Optional and no default, so skip
+                    continue
+
+            # 3. Type Coercion (Basic)
+            coerced_value = actual_value
+            try:
+                if defined_param.type == "integer" and actual_value is not None: coerced_value = int(actual_value)
+                elif defined_param.type == "float" and actual_value is not None: coerced_value = float(actual_value)
+                elif defined_param.type == "boolean" and actual_value is not None:
+                    if isinstance(actual_value, str): coerced_value = actual_value.lower() in ["true", "1", "yes"]
+                    else: coerced_value = bool(actual_value)
+                # For "string", "list", "dict", assume correct format or rely on handler/LLM
+            except ValueError as e_coerce:
+                param_validation_errors.append(f"Parameter '{param_name}' value '{actual_value}' could not be coerced to type '{defined_param.type}': {e_coerce}")
+                continue
+
+            resolved_params[param_name] = coerced_value
+
+        if param_validation_errors:
+            error_msg = f"Parameter validation failed for service '{service_name}': " + "; ".join(param_validation_errors)
+            return {"step_id": step_id, "status": "error", "response": error_msg, "data": None, "error_code": "PARAMETER_VALIDATION_FAILED"}
+
+        # --- Execute Service ---
+        service_result_structured: Dict[str, Any]
+
+        if service_key in self.service_handlers:
+            handler_method = self.service_handlers[service_key]
+            print(f"{log_prefix}Executing direct handler for service '{service_name}' on agent '{target_agent_name}' with params: {resolved_params}")
+            try:
+                # Pass both resolved_params and the service_def for context to the handler
+                service_result_structured = await handler_method(params=resolved_params, service_definition=service_def)
+            except Exception as e_handler:
+                err_msg = f"Direct handler for service '{service_name}' raised an exception: {e_handler}"
+                print(f"{log_prefix}ERROR: {err_msg}")
+                service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "HANDLER_EXCEPTION"}
+        else:
+            print(f"{log_prefix}No direct handler for service '{service_name}' on agent '{target_agent_name}'. Using LLM fallback with definition.")
+            target_agent = next((a for a in self.agents if a.name == target_agent_name and a.active), None)
+            if not target_agent:
+                return {"step_id": step_id, "status": "error", "response": f"Target agent '{target_agent_name}' not found or inactive.", "data": None, "error_code": "AGENT_NOT_FOUND"}
+
+            # Construct enhanced LLM prompt using service_def
+            param_details_for_prompt = "\n".join([f"  - {p.name} ({p.type}, {'required' if p.required else 'optional'}{', default: '+str(p.default_value) if p.default_value is not None and not p.required else ''}): {p.description}" for p in service_def.parameters])
+            returns_details_for_prompt = f"  - type: {service_def.returns.type}\n  - description: {service_def.returns.description}"
+
+            fallback_prompt = (
+                f"You are agent '{target_agent_name}'. You need to perform the service called '{service_def.name}'.\n"
+                f"Service Description: {service_def.description}\n\n"
+                f"Parameters Expected:\n{param_details_for_prompt}\n\n"
+                f"Expected Return Structure:\n{returns_details_for_prompt}\n\n"
+                f"Parameters Provided for this Call:\n{json.dumps(resolved_params, indent=2)}\n\n"
+                f"Based on the service description, process the provided parameters and generate a JSON response that strictly conforms to the 'Expected Return Structure'. The main data should be under a 'data' key in your JSON response, and you should also include a 'status' ('success' or 'error') and a 'message' key."
+                f"Example of expected JSON output format from you (the LLM agent):\n"
+                f"{{\n  \"status\": \"success\",\n  \"data\": <value_matching_return_type_of_{service_def.returns.type}>,\n  \"message\": \"Service completed successfully.\"\n}}"
+            )
+
+            llm_call_result = await self.execute_agent(target_agent, fallback_prompt) # Assumes execute_agent returns a dict like {"status": "success", "response": "..."}
+
+            if llm_call_result.get("status") == "success":
+                try:
+                    # The LLM is now expected to return the standardized structure directly
+                    parsed_llm_response = json.loads(llm_call_result.get("response","{}"))
+                    if not isinstance(parsed_llm_response, dict) or \
+                       "status" not in parsed_llm_response or \
+                       "data" not in parsed_llm_response: # message is optional
+                        raise ValueError("LLM response does not conform to expected structured JSON with status and data keys.")
+                    service_result_structured = parsed_llm_response
+                    if "message" not in service_result_structured: # Add a default message if LLM omits it
+                        service_result_structured["message"] = f"LLM for service '{service_name}' completed with status: {service_result_structured['status']}"
+
+                except json.JSONDecodeError as e_json_llm:
+                    err_msg = f"LLM for service '{service_name}' returned non-JSON or malformed JSON response: {e_json_llm}. Raw: {llm_call_result.get('response','')[:200]}..."
+                    print(f"{log_prefix}ERROR: {err_msg}")
+                    service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "LLM_RESPONSE_MALFORMED"}
+                except ValueError as e_val_llm:
+                    err_msg = f"LLM for service '{service_name}' response structure error: {e_val_llm}. Raw: {llm_call_result.get('response','')[:200]}..."
+                    print(f"{log_prefix}ERROR: {err_msg}")
+                    service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "LLM_RESPONSE_STRUCTURE_INVALID"}
+            else: # LLM call itself failed (e.g., Ollama error)
+                err_msg = f"LLM call for service '{service_name}' failed: {llm_call_result.get('response')}"
+                print(f"{log_prefix}ERROR: {err_msg}")
+                service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "LLM_CALL_FAILED"}
+
+        # --- Process final result ---
+        final_status = service_result_structured.get("status", "error")
+        final_data = service_result_structured.get("data")
+        final_message = service_result_structured.get("message", "Service call completed.")
+        error_code = service_result_structured.get("error_code")
+
+        if final_status != "success":
+            print(f"{log_prefix}Service call step {step_id} ('{service_name}' on '{target_agent_name}') failed. Status: {final_status}, Message: {final_message[:100]}...")
+        else:
+            print(f"{log_prefix}Service call step {step_id} ('{service_name}' on '{target_agent_name}') completed successfully.")
+
+        if output_var_name and final_status == "success":
+            current_step_outputs[output_var_name] = final_data
+
+        return {
+            "step_id": step_id,
+            "agent_name": f"{target_agent_name} (Service: {service_name})",
+            "status": final_status,
+            "response": final_message, # User-facing/log summary message
+            "data": final_data, # Actual data payload
+            "error_code": error_code
+        }
+
+   async def _service_codemaster_validate_syntax(self, params: Dict, service_definition: AgentServiceDefinition) -> Dict:
+        # service_definition is now passed but not strictly needed if params are already validated by caller.
+        # It could be used for more complex logic if the handler serves multiple similar services.
+        code_snippet = params.get("code_snippet")
+        language = params.get("language", "python") # Default already handled by param validation if defined so.
+
+        # Parameter presence already validated by _handle_agent_service_call based on service_def
+        # if not code_snippet:
+        #     return {"status": "error", "data": None, "message": "No code_snippet provided for validation.", "error_code": "MISSING_PARAMETER"}
+
         codemaster_agent = next((a for a in self.agents if a.name == "CodeMaster" and a.active), None)
-        if not codemaster_agent: return {"status": "error", "message": "CodeMaster agent not available for syntax validation."}
-        prompt = (f"Analyze the following {language} code snippet for syntax errors. Respond in JSON format with two keys: 'is_valid' (boolean) and 'errors' (a list of strings, empty if valid).\nCode:\n```\n{code_snippet}\n```\nJSON Response:")
-        llm_response = await self.execute_agent(codemaster_agent, prompt)
+        if not codemaster_agent:
+            return {"status": "error", "data": None, "message": "CodeMaster agent not available for syntax validation.", "error_code": "AGENT_UNAVAILABLE"}
+
+        prompt = (f"Analyze the following {language} code snippet for syntax errors. Respond ONLY with a JSON object containing two keys: 'is_valid' (boolean) and 'errors' (a list of strings, empty if valid). Do not add any explanatory text outside the JSON.\nCode:\n```\n{code_snippet}\n```\nJSON Response:")
+
+        llm_response = await self.execute_agent(codemaster_agent, prompt) # execute_agent returns dict with "status" and "response"
+
         if llm_response.get("status") == "success":
             try:
+                # The LLM for this specific internal service is expected to return just the data part of the structured response
                 validation_data = json.loads(llm_response.get("response"))
-                return {"status": "success", "data": validation_data, "response": f"Syntax validation for {language} completed. Valid: {validation_data.get('is_valid')}."}
-            except json.JSONDecodeError: return {"status": "error", "message": "CodeMaster (validator) returned non-JSON response.", "raw_response": llm_response.get("response")}
-        else: return {"status": "error", "message": f"CodeMaster LLM call failed for syntax validation: {llm_response.get('response')}"}
+                if not isinstance(validation_data, dict) or "is_valid" not in validation_data or "errors" not in validation_data:
+                     raise ValueError("LLM response for syntax validation is not a dict with 'is_valid' and 'errors' keys.")
+                return {"status": "success", "data": validation_data, "message": f"Syntax validation for {language} completed. Valid: {validation_data.get('is_valid')}."}
+            except json.JSONDecodeError:
+                return {"status": "error", "data": None, "message": "CodeMaster (validator LLM) returned non-JSON response.", "raw_response": llm_response.get("response"), "error_code": "LLM_RESPONSE_MALFORMED"}
+            except ValueError as e: # For structure validation
+                 return {"status": "error", "data": None, "message": f"CodeMaster (validator LLM) response structure error: {e}", "raw_response": llm_response.get("response"), "error_code": "LLM_RESPONSE_STRUCTURE_INVALID"}
+        else: # execute_agent (ollama call) failed
+            return {"status": "error", "data": None, "message": f"CodeMaster LLM call failed for syntax validation: {llm_response.get('response')}", "error_code": "LLM_CALL_FAILED"}
+
 
    async def store_knowledge(self, content: str, metadata: Optional[Dict] = None, content_id: Optional[str] = None) -> Dict:
        if self.knowledge_collection is None: return {"status": "error", "message": "KB not initialized."}

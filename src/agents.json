@@ -39,7 +39,34 @@
     "model": "ollama/deepseek-coder-v2:16b",
     "specialty": "Handles code-related tasks: explaining code snippets, generating new code modules/classes, and experimental AI-assisted code modification in projects. Stores outputs in KB. Specialized in Programming & Development.",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "provided_services": [
+      {
+        "name": "validate_code_syntax",
+        "description": "Validates the syntax of a given code snippet for a specified language. Returns validation status and errors if any.",
+        "parameters": [
+          {"name": "code_snippet", "type": "string", "required": true, "description": "The code snippet to validate."},
+          {"name": "language", "type": "string", "required": false, "description": "The programming language of the snippet.", "default_value": "python"}
+        ],
+        "returns": {
+          "type": "dict",
+          "description": "A dictionary with 'is_valid' (boolean) and 'errors' (list of strings, empty if valid)."
+        },
+        "handler_method_name": "_service_codemaster_validate_syntax"
+      },
+      {
+        "name": "generate_docstring",
+        "description": "Generates a docstring for a given code function or class based on its content.",
+        "parameters": [
+           {"name": "code_snippet", "type": "string", "required": true, "description": "The function or class code for which to generate a docstring."},
+           {"name": "language", "type": "string", "required": false, "description": "The programming language of the code snippet.", "default_value": "python"}
+        ],
+        "returns": {
+          "type": "string",
+          "description": "The generated docstring text."
+        }
+      }
+    ]
   },
   {
     "name": "AudioMaestro",
