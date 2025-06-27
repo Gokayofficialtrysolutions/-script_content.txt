@@ -67,7 +67,33 @@ def display_feedback_widgets(item_id: str, item_type: str,
         else:
             st.error("Failed to store negative feedback.")
 
+def cleanup_temp_uploads(base_path: Path, temp_folder_name: str = "temp_uploads"):
+    """Clears a specific temporary upload folder."""
+    temp_dir = base_path / temp_folder_name
+    if temp_dir.exists() and temp_dir.is_dir():
+        for item in temp_dir.iterdir():
+            try:
+                if item.is_file():
+                    item.unlink()
+                # Optionally, if subdirectories could be created by users (unlikely for this case):
+                # elif item.is_dir():
+                # shutil.rmtree(item) # Be careful with rmtree
+            except Exception as e:
+                print(f"Warning: Could not delete temp item {item}: {e}")
+                # st.sidebar.caption(f"FYI: Could not delete temp item {item.name}") # Optional UI feedback
+
 def main():
+   # Fallback Startup Cleanup
+   if orchestrator: # Check if orchestrator is loaded
+        # Video temp uploads
+        video_temp_base = Path(orchestrator.video_processing_dir)
+        cleanup_temp_uploads(video_temp_base, "temp_uploads")
+
+        # Audio temp uploads
+        audio_temp_base = Path(orchestrator.audio_processing_dir)
+        cleanup_temp_uploads(audio_temp_base, "temp_uploads")
+        # st.sidebar.caption("Temp upload folders checked for cleanup.") # Optional UI feedback
+
    st.markdown("""<div style='text-align:center;background:linear-gradient(90deg,#FF6B6B,#4ECDC4,#45B7D1,#96CEB4);padding:20px;border-radius:10px;margin-bottom:20px'>
    <h1 style='color:white;text-shadow:2px 2px 4px rgba(0,0,0,0.5)'>TERMINUS AI NEXUS</h1>
    <p style='color:white;font-size:18px'>ULTIMATE LOCAL AI ECOSYSTEM | ADVANCED ORCHESTRATION</p></div>""",unsafe_allow_html=True)
@@ -433,6 +459,14 @@ def main():
                        display_feedback_widgets(f"meta_{uploaded_video.name}", "video_metadata_result", f"meta_{uploaded_video.name}_fb", operation_mode)
                    else:
                        st.error(f"Failed to get metadata: {result.get('message')}")
+                   finally:
+                       if temp_video_path.exists():
+                           try:
+                               temp_video_path.unlink()
+                               # st.caption(f"Temporary file {temp_video_path.name} cleaned up.")
+                           except Exception as e_cleanup:
+                               st.warning(f"Could not clean up temporary file {temp_video_path.name}: {e_cleanup}")
+
 
            st.markdown("---")
            st.subheader("Extract Frame")
@@ -447,6 +481,13 @@ def main():
                            display_feedback_widgets(f"frame_{uploaded_video.name}_{extract_ts}", "video_frame_extraction_result", f"frame_{uploaded_video.name}_{extract_ts}_fb", operation_mode)
                        else:
                            st.error(f"Failed to extract frame: {result.get('message')}")
+                   finally:
+                       if temp_video_path.exists(): # Check again as it might have been cleaned by previous op if same file uploaded twice
+                           try:
+                               temp_video_path.unlink()
+                               # st.caption(f"Temporary file {temp_video_path.name} cleaned up.")
+                           except Exception as e_cleanup:
+                               st.warning(f"Could not clean up temporary file {temp_video_path.name}: {e_cleanup}")
                else:
                    st.warning("Please enter a timestamp.")
 
@@ -468,15 +509,15 @@ def main():
                            display_feedback_widgets(f"gif_{uploaded_video.name}_{gif_start_ts}_{gif_end_ts}", "video_gif_conversion_result", f"gif_{uploaded_video.name}_{gif_start_ts}_{gif_end_ts}_fb", operation_mode)
                        else:
                            st.error(f"Failed to convert to GIF: {result.get('message')}")
+                   finally:
+                       if temp_video_path.exists(): # Check again
+                           try:
+                               temp_video_path.unlink()
+                               # st.caption(f"Temporary file {temp_video_path.name} cleaned up.")
+                           except Exception as e_cleanup:
+                               st.warning(f"Could not clean up temporary file {temp_video_path.name}: {e_cleanup}")
                else:
                    st.warning("Please enter both start and end timestamps for GIF conversion.")
-
-           # Clean up temp file after processing for this session (or manage more robustly if needed)
-           # For now, simple removal. This means re-upload is needed for new operations on same video.
-           # Consider leaving it and having a clear button or session-based cleanup.
-           # For simplicity, let's assume it's fine for now.
-           # if temp_video_path.exists():
-           #     temp_video_path.unlink()
 
    elif operation_mode == "Audio Processing":
        st.subheader("🎤 AUDIO PROCESSING SUITE")
@@ -524,6 +565,13 @@ def main():
                                display_feedback_widgets(f"info_{uploaded_audio.name}", "audio_info_result", f"info_{uploaded_audio.name}_fb", operation_mode)
                            else:
                                st.error(f"Failed to get audio info: {result.get('message')}")
+                       finally:
+                           if temp_audio_path.exists():
+                               try:
+                                   temp_audio_path.unlink()
+                                   # st.caption(f"Temporary file {temp_audio_path.name} cleaned up.")
+                               except Exception as e_cleanup:
+                                   st.warning(f"Could not clean up temporary file {temp_audio_path.name}: {e_cleanup}")
 
                elif audio_task == "Convert Audio Format":
                    st.markdown("---")
@@ -540,10 +588,14 @@ def main():
                                display_feedback_widgets(f"convert_{uploaded_audio.name}_{target_format}", "audio_conversion_result", f"convert_{uploaded_audio.name}_{target_format}_fb", operation_mode)
                            else:
                                st.error(f"Failed to convert audio: {result.get('message')}")
+                       finally:
+                           if temp_audio_path.exists(): # Check again
+                               try:
+                                   temp_audio_path.unlink()
+                                   # st.caption(f"Temporary file {temp_audio_path.name} cleaned up.")
+                               except Exception as e_cleanup:
+                                   st.warning(f"Could not clean up temporary file {temp_audio_path.name}: {e_cleanup}")
 
-               # Consider temp file cleanup logic here or at session end
-               # if temp_audio_path.exists():
-               #     temp_audio_path.unlink()
    elif operation_mode == "Code Generation":
        st.subheader("💻 PROJECT SCAFFOLDING & CODE GENERATION")
 
