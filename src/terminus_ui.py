@@ -8,8 +8,8 @@ from typing import Optional # For type hinting in display_feedback_widgets
 # The launch_terminus.py script should handle adding $INSTALL_DIR to sys.path or PYTHONPATH
 # so that `from agents.master_orchestrator import ...` works.
 try:
-    # doc_processor has been removed. web_intel will be handled in a future step.
-    from agents.master_orchestrator import orchestrator, web_intel
+    # doc_processor and web_intel have been removed.
+    from agents.master_orchestrator import orchestrator
 except ImportError as e:
     st.error(f"Critical Error: Could not import orchestrator components: {e}. UI cannot function.")
     st.stop() # Halt execution of the UI if core components can't be imported
@@ -314,29 +314,49 @@ def main():
 
        if web_task == "Search Web & Analyze":
            search_query = st.text_input("Enter Search Query:", key="web_search_query")
+           num_results_display = st.number_input("Number of search results to display/analyze:", 1, 10, 3, key="web_search_num_display")
+
            if st.button("Search & Analyze Results", key="web_search_button"):
                if search_query:
-                   with st.spinner("Searching the web and analyzing results..."):
-                       try:
-                           search_results = web_intel.search_web(search_query)
-                           st.success(f"Found {len(search_results)} results for '{search_query}'. Displaying top 3.")
-                           st.json(search_results[:3]) # Show top 3 results
+                   with st.spinner("Searching the web..."):
+                       webcrawler_agent = next((a for a in orchestrator.agents if a.name == "WebCrawler" and a.active), None)
+                       search_results = [] # Initialize
+                       if webcrawler_agent:
+                           # The search_query is passed as the prompt to the WebCrawler agent
+                           search_op_result = asyncio.run(orchestrator.execute_agent(webcrawler_agent, search_query))
 
-                           if search_results:
-                               analysis_prompt_content = f"Analyze these web search results for query '{search_query}':\n"
-                               for i, sr in enumerate(search_results[:3]): # Analyze top 3
-                                   analysis_prompt_content += f"\nResult {i+1}:\nTitle: {sr.get('title')}\nURL: {sr.get('url')}\nSnippet: {sr.get('snippet')}\n---"
-
-                               # Use selected_agents_names from sidebar
-                               analysis_results = asyncio.run(orchestrator.parallel_execution(analysis_prompt_content, selected_agents_names))
-                               st.subheader("AI Analysis of Search Results:")
-                               for res in analysis_results:
-                                   with st.expander(f"{res.get('agent','N/A')} Analysis"):
-                                       st.write(str(res.get("response","N/A")))
+                           if search_op_result.get("status") == "success" and search_op_result.get("response_type") == "search_results":
+                               search_results = search_op_result.get("response", [])
+                               st.success(f"Found {len(search_results)} results for '{search_query}'. Displaying top {num_results_display}.")
+                               if search_results:
+                                   # Display search results as clickable links and snippets
+                                   for i, res_item in enumerate(search_results[:num_results_display]):
+                                       st.markdown(f"**{i+1}. [{res_item.get('title', 'No Title')}]({res_item.get('url')})**")
+                                       st.caption(res_item.get('url'))
+                                       st.markdown(f"> {res_item.get('snippet', 'No snippet available.')}")
+                                       st.markdown("---")
+                               else:
+                                   st.info("No search results found.")
                            else:
-                               st.info("No search results to analyze.")
-                       except Exception as e:
-                           st.error(f"Error during web search & analysis: {e}")
+                               st.error(f"Web search failed: {search_op_result.get('response', 'Unknown error')}")
+                               search_results = [] # Ensure it's an empty list on failure
+                       else:
+                           st.error("WebCrawler agent is not available or active.")
+                           search_results = []
+
+                   # Proceed with AI analysis if search_results were found
+                   if search_results:
+                       with st.spinner("Analyzing search results with AI..."):
+                           analysis_prompt_content = f"Analyze these top {num_results_display} web search results for the query '{search_query}':\n"
+                           for i, sr in enumerate(search_results[:num_results_display]):
+                               analysis_prompt_content += f"\nResult {i+1}:\nTitle: {sr.get('title')}\nURL: {sr.get('url')}\nSnippet: {sr.get('snippet')}\n---"
+
+                           # Use selected_agents_names from sidebar for analysis
+                           analysis_results = asyncio.run(orchestrator.parallel_execution(analysis_prompt_content, selected_agents_names))
+                           st.subheader("AI Analysis of Search Results:")
+                           for res_analysis in analysis_results:
+                               with st.expander(f"{res_analysis.get('agent','N/A')} Analysis"):
+                                   st.write(str(res_analysis.get("response","N/A")))
                else:
                    st.warning("Please enter a search query.")
 
