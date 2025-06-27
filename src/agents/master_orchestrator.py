@@ -93,6 +93,12 @@ class TerminusOrchestrator:
            print(f"WARNING: Failed to initialize TTS engine: {e}.")
            self.tts_engine = None
 
+import fitz  # PyMuPDF
+import docx
+import openpyxl
+from bs4 import BeautifulSoup
+import io # For BytesIO
+
        # NLU pipelines (intent_classifier, ner_pipeline) are removed as NLU is now agent-based.
        # self.intent_classifier_model_name and self.ner_model_name are also removed.
        self.candidate_intent_labels = [
@@ -900,19 +906,121 @@ class TerminusOrchestrator:
         except Exception as e:
             return {"status": "error", "message": f"Error processing NLU agent response: {str(e)}", "intent": None, "entities": []}
 
+    async def extract_document_content(self, uploaded_file_object: Any, original_filename: str) -> Dict[str, Any]:
+        content_text = ""
+        status = "error"
+        message = "File type not supported or error during processing."
+        file_ext = Path(original_filename).suffix.lower().strip('.')
 
-class DocumentUniverse:
-   def process_file(self, uploaded_file: Any) -> str:
-        file_name = getattr(uploaded_file, 'name', 'unknown_file')
-        file_ext = Path(file_name).suffix.lower().strip('.')
+        # Ensure Any is imported if not already
+        from typing import Any
+
         try:
-            if file_ext == 'txt': return uploaded_file.read().decode('utf-8', errors='replace')
-            elif file_ext == 'json': return json.dumps(json.load(uploaded_file))
-            elif file_ext == 'csv': return uploaded_file.read().decode('utf-8', errors='replace')
-            else: return f"Content from '{file_name}' (type: {file_ext}) - processing placeholder."
-        except Exception as e: return f"Error processing file {file_name}: {str(e)}"
+            # Make sure uploaded_file_object has getvalue() for bytes
+            if not hasattr(uploaded_file_object, 'getvalue'):
+                raise ValueError("uploaded_file_object does not have getvalue() method.")
 
-class WebIntelligence:
+            file_bytes = uploaded_file_object.getvalue()
+
+            if file_ext == 'txt':
+                content_text = file_bytes.decode('utf-8', errors='replace')
+                status = "success"
+                message = "Text file processed."
+
+            elif file_ext == 'json':
+                try:
+                    parsed_json = json.loads(file_bytes.decode('utf-8', errors='replace'))
+                    content_text = json.dumps(parsed_json, indent=2)
+                    status = "success"
+                    message = "JSON file processed."
+                except json.JSONDecodeError as e:
+                    content_text = file_bytes.decode('utf-8', errors='replace')
+                    message = f"JSON parsing error: {str(e)}. Displaying raw content."
+                    status = "partial_success"
+
+            elif file_ext == 'csv':
+                content_text = file_bytes.decode('utf-8', errors='replace')
+                status = "success"
+                message = "CSV file processed as text."
+
+            elif file_ext == 'pdf':
+                try:
+                    doc = fitz.open(stream=file_bytes, filetype="pdf")
+                    text_parts = []
+                    for page_num in range(len(doc)):
+                        page = doc.load_page(page_num)
+                        text_parts.append(page.get_text("text"))
+                    content_text = "\n".join(text_parts)
+                    status = "success"
+                    message = f"PDF processed ({len(doc)} pages)."
+                    if not content_text.strip():
+                        message += " Note: No text content found (possibly image-based PDF)."
+                except Exception as e:
+                    message = f"Error processing PDF: {str(e)}"
+
+            elif file_ext == 'docx':
+                try:
+                    doc = docx.Document(io.BytesIO(file_bytes))
+                    text_parts = [para.text for para in doc.paragraphs]
+                    content_text = "\n".join(text_parts)
+                    status = "success"
+                    message = "DOCX file processed."
+                except Exception as e:
+                    message = f"Error processing DOCX: {str(e)}"
+
+            elif file_ext == 'xlsx':
+                try:
+                    workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+                    text_parts = []
+                    for sheet_name in workbook.sheetnames:
+                        sheet = workbook[sheet_name]
+                        text_parts.append(f"--- Sheet: {sheet_name} ---")
+                        for row in sheet.iter_rows():
+                            row_texts = [str(cell.value) if cell.value is not None else "" for cell in row]
+                            text_parts.append(", ".join(row_texts))
+                    content_text = "\n".join(text_parts)
+                    status = "success"
+                    message = f"XLSX file processed ({len(workbook.sheetnames)} sheets)."
+                except Exception as e:
+                    message = f"Error processing XLSX: {str(e)}"
+
+            elif file_ext == 'html' or file_ext == 'htm':
+                try:
+                    soup = BeautifulSoup(file_bytes, 'html.parser')
+                    content_text = soup.get_text(separator='\n', strip=True)
+                    status = "success"
+                    message = "HTML file processed."
+                except Exception as e:
+                    message = f"Error processing HTML: {str(e)}"
+
+            else:
+                try:
+                    content_text = file_bytes.decode('utf-8', errors='replace')
+                    status = "partial_success"
+                    message = f"File type '{file_ext}' not specifically handled, attempted to read as text."
+                except Exception:
+                    message = f"File type '{file_ext}' not supported and could not be read as raw text."
+                    content_text = None
+                    status = "error"
+
+            if content_text is None:
+                content_text = ""
+
+        except Exception as e_outer:
+            message = f"Outer error during file processing: {str(e_outer)}"
+            content_text = ""
+            status = "error"
+
+        return {
+            "status": status,
+            "content": content_text.strip(),
+            "file_type_processed": file_ext,
+            "message": message
+        }
+
+# DocumentUniverse class has been removed as its functionality is now in TerminusOrchestrator.extract_document_content
+
+class WebIntelligence: # This class will be refactored/removed in a subsequent step for A3.2
     def search_web(self, query: str, num_results: int = 3) -> List[Dict]:
         print(f"Simulating web search for: {query} (returning {num_results} placeholder results)")
         results = []
@@ -931,5 +1039,5 @@ class WebIntelligence:
             return { "status": "error", "message": f"Mock scrape failed for {url}.", "url": url }
 
 orchestrator = TerminusOrchestrator()
-doc_processor = DocumentUniverse()
-web_intel = WebIntelligence()
+# doc_processor instance has been removed.
+web_intel = WebIntelligence() # This instance will be dealt with in A3.2

@@ -8,7 +8,8 @@ from typing import Optional # For type hinting in display_feedback_widgets
 # The launch_terminus.py script should handle adding $INSTALL_DIR to sys.path or PYTHONPATH
 # so that `from agents.master_orchestrator import ...` works.
 try:
-    from agents.master_orchestrator import orchestrator, doc_processor, web_intel
+    # doc_processor has been removed. web_intel will be handled in a future step.
+    from agents.master_orchestrator import orchestrator, web_intel
 except ImportError as e:
     st.error(f"Critical Error: Could not import orchestrator components: {e}. UI cannot function.")
     st.stop() # Halt execution of the UI if core components can't be imported
@@ -234,25 +235,57 @@ def main():
                file_key = f"doc_{file.name}_{file.id if hasattr(file, 'id') else str(uuid.uuid4())[:8]}" # More unique key
                with st.expander(f"📄 {file.name}"):
                    try:
-                       content=doc_processor.process_file(file) # Assumes process_file can handle UploadedFile
-                       if isinstance(content, (dict, list)): # If JSON or CSV parsed into structure
-                           st.json(content)
-                           content_str_for_analysis = json.dumps(content)[:5000] # Analyze JSON string
-                       else: # Text content
-                           st.text_area("Content Preview", str(content)[:2000]+"..." if len(str(content))>2000 else str(content), height=200, key=f"preview_{file_key}")
-                           content_str_for_analysis = str(content)[:5000]
+                       # Call the new orchestrator method for content extraction
+                       extraction_result = asyncio.run(orchestrator.extract_document_content(file, file.name))
+                       content = extraction_result.get("content")
+                       status = extraction_result.get("status")
+                       message = extraction_result.get("message")
+                       file_type_processed = extraction_result.get("file_type_processed", "unknown")
 
-                       if st.button(f"Analyze with AI & Store Excerpt in KB",key=f"analyze_{file_key}"):
-                           with st.spinner("Storing document excerpt and analyzing..."):
-                               doc_metadata = {
-                                   "source": "document_upload", "filename": file.name,
-                                   "filetype": file.type if file.type else Path(file.name).suffix,
-                                   "processed_timestamp": datetime.datetime.now().isoformat()
-                               }
-                               excerpt_to_store = content_str_for_analysis[:2000] # Consistent excerpt length
+                       content_str_for_analysis = "" # Initialize
 
-                               async def store_and_publish_doc_excerpt_wrapper(): # Wrapper for async calls
-                                   kb_store_result = await orchestrator.store_knowledge(content=excerpt_to_store, metadata=doc_metadata)
+                       if status == "success":
+                           st.info(f"Successfully processed '{file.name}' ({file_type_processed}). {message if message else ''}")
+                           if content:
+                               if file_type_processed == 'json':
+                                   try:
+                                       st.json(json.loads(content)) # Parse stringified JSON for st.json
+                                   except json.JSONDecodeError:
+                                       st.text_area("Content Preview (JSON parse error, showing raw):", content[:5000]+"..." if len(content)>5000 else content, height=200, key=f"preview_{file_key}")
+                               else:
+                                   st.text_area("Content Preview", content[:5000]+"..." if len(content)>5000 else content, height=200, key=f"preview_{file_key}")
+                               content_str_for_analysis = content[:5000] # Use up to 5000 chars for analysis excerpt
+                           else: # Success but no content (e.g. image-only PDF)
+                               st.info(f"Successfully processed '{file.name}', but no text content was extracted. {message if message else ''}")
+
+                       elif status == "partial_success":
+                           st.warning(f"Partially processed '{file.name}' ({file_type_processed}). {message if message else ''}")
+                           if content:
+                               st.text_area("Content Preview (Partial):", content[:5000]+"..." if len(content)>5000 else content, height=200, key=f"preview_{file_key}")
+                               content_str_for_analysis = content[:5000]
+
+                       else: # status == "error" or unknown
+                           st.error(f"Error processing file {file.name}: {message}")
+                           # content_str_for_analysis remains empty
+
+                       # "Analyze with AI & Store Excerpt in KB" button logic
+                       # This button should only be active if content_str_for_analysis has something.
+                       if content_str_for_analysis:
+                           if st.button(f"Analyze with AI & Store Excerpt in KB",key=f"analyze_{file_key}"):
+                               with st.spinner("Storing document excerpt and analyzing..."):
+                                   doc_metadata = {
+                                       "source": "document_upload", "filename": file.name,
+                                       "filetype": file_type_processed, # Use detected file type
+                                       "processed_timestamp": datetime.datetime.now().isoformat(),
+                                       "extraction_status": status,
+                                       "extraction_message": message
+                                   }
+                                   # Ensure excerpt_to_store is not empty if button is active
+                                   excerpt_to_store = content_str_for_analysis[:2000] if content_str_for_analysis else "No content extracted for analysis."
+
+
+                                   async def store_and_publish_doc_excerpt_wrapper(): # Wrapper for async calls
+                                       kb_store_result = await orchestrator.store_knowledge(content=excerpt_to_store, metadata=doc_metadata)
                                    if kb_store_result.get("status") == "success":
                                        st.success(f"Document excerpt stored in KB (ID: {kb_store_result.get('id')}).")
                                        await orchestrator.publish_message(
