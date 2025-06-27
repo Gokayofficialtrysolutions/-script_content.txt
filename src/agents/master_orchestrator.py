@@ -39,9 +39,11 @@ import io # For BytesIO
 
 from duckduckgo_search import DDGS
 
+from collections import defaultdict # Ensure defaultdict is imported if not already
 from ..core import prompt_constructors
 from ..core.rl_logger import RLExperienceLogger
-from ..core.async_tools import AsyncTask, AsyncTaskStatus # New Import
+from ..core.async_tools import AsyncTask, AsyncTaskStatus
+from ..core.event_system import SystemEvent # New Import for Event Bus
 
 
 # --- New/Modified Dataclasses for Service Definitions ---
@@ -93,6 +95,12 @@ class TerminusOrchestrator:
        # Lock for thread-safe/async-safe modifications to the task registry
        self._task_registry_lock = asyncio.Lock()
        # --- End Async Task Management Structures ---
+
+       # --- Event Bus Structures ---
+       self.event_subscribers: Dict[str, List[Callable[[SystemEvent], Coroutine[Any, Any, None]]]] = defaultdict(list)
+       self.event_processing_queue: asyncio.Queue[SystemEvent] = asyncio.Queue()
+       self._event_dispatcher_task: Optional[asyncio.Task] = None
+       # --- End Event Bus Structures ---
 
        self.install_dir = Path(__file__).resolve().parent.parent
        self.agents_config_path = self.install_dir / "agents.json"
@@ -195,9 +203,18 @@ class TerminusOrchestrator:
            print(f"KB initialized: Collection '{self.kb_collection_name}' at {self.chroma_db_path}.")
        except Exception as e: print(f"CRITICAL ERROR initializing ChromaDB: {e}. KB unavailable.")
 
-       self.message_bus_subscribers = defaultdict(list)
-       self.message_processing_tasks = set()
-       self._setup_initial_event_listeners()
+       # Old message bus attributes are removed as the new event system replaces them.
+       # self.message_bus_subscribers = defaultdict(list)
+       # self.message_processing_tasks = set()
+       # self._setup_initial_event_listeners() # This call is removed. Subscriptions will use the new event bus.
+
+       # Start the new event dispatcher loop
+       self._event_dispatcher_task = asyncio.create_task(self._event_dispatcher_loop())
+       print("TerminusOrchestrator: New event dispatcher loop started.")
+
+       # Subscribe initial internal event handlers
+       self.subscribe_to_event("kb.content.added", self._event_handler_kb_content_added)
+       self.subscribe_to_event("user.feedback.submitted", self._event_handler_log_user_feedback) # Added for 2.4
 
        # self.service_handlers is now populated dynamically during agent loading
        # based on "handler_method_name" in service definitions.
@@ -319,6 +336,85 @@ class TerminusOrchestrator:
             return cancelled
    # --- End Asynchronous Task Management Methods ---
 
+   # --- Event Bus Methods ---
+   async def publish_event(self, event_type: str, source_component: str, payload: Dict) -> str:
+        """
+        Creates a SystemEvent and puts it onto the event_processing_queue.
+        Returns the event_id.
+        """
+        event = SystemEvent(
+            event_type=event_type,
+            source_component=source_component,
+            payload=payload
+        )
+        await self.event_processing_queue.put(event)
+        print(f"[EventBus] Published Event ID: {event.event_id}, Type: '{event.event_type}', Source: '{event.source_component}', Payload: {str(payload)[:100]}...")
+        return event.event_id
+
+   def subscribe_to_event(self, event_type: str, handler: Callable[[SystemEvent], Coroutine[Any, Any, None]]):
+        """
+        Subscribes an asynchronous handler to a specific event type.
+        """
+        self.event_subscribers[event_type].append(handler)
+        handler_name = getattr(handler, '__name__', str(handler))
+        print(f"[EventBus] Subscribed handler '{handler_name}' to event type '{event_type}'.")
+
+   async def _event_dispatcher_loop(self):
+        """
+        Continuously gets events from the queue and dispatches them to subscribers.
+        """
+        print("[EventBus] Dispatcher loop started. Waiting for events...")
+        while True:
+            try:
+                event = await self.event_processing_queue.get()
+                print(f"[EventBus] Dispatching Event ID: {event.event_id}, Type: '{event.event_type}'...")
+
+                handlers_to_call = self.event_subscribers.get(event.event_type, [])
+                if not handlers_to_call:
+                    print(f"[EventBus] No subscribers for event type '{event.event_type}'. Event ID: {event.event_id}")
+                    self.event_processing_queue.task_done()
+                    continue
+
+                # Using asyncio.create_task for each handler to allow them to run concurrently
+                # and not block the dispatcher loop if one handler is slow or errors.
+                handler_tasks = []
+                for handler in handlers_to_call:
+                    handler_name = getattr(handler, '__name__', str(handler))
+                    print(f"[EventBus] Calling handler '{handler_name}' for Event ID: {event.event_id} Type: {event.event_type}")
+                    handler_tasks.append(asyncio.create_task(self._safe_execute_handler(handler, event)))
+
+                # Wait for all handlers for this event to complete (or error)
+                # This is optional; if we don't want to wait, we can just launch tasks.
+                # For now, let's gather them to see their completion.
+                await asyncio.gather(*handler_tasks, return_exceptions=False) # Errors handled in _safe_execute_handler
+
+                self.event_processing_queue.task_done()
+                print(f"[EventBus] Finished processing Event ID: {event.event_id}, Type: '{event.event_type}'.")
+
+            except asyncio.CancelledError:
+                print("[EventBus] Dispatcher loop cancelled.")
+                break
+            except Exception as e:
+                print(f"[EventBus] CRITICAL ERROR in dispatcher loop: {e}. Loop continues but this event might be lost.")
+                # Potentially re-queue the event or log to a dead-letter queue in a real system
+                # For now, just mark as done to avoid blocking queue if get() was successful.
+                if 'event' in locals() and self.event_processing_queue._unfinished_tasks > 0 : # Check if get() was successful
+                     self.event_processing_queue.task_done()
+
+
+   async def _safe_execute_handler(self, handler: Callable[[SystemEvent], Coroutine[Any, Any, None]], event: SystemEvent):
+        """
+        Safely executes a single event handler, catching and logging exceptions.
+        """
+        handler_name = getattr(handler, '__name__', str(handler))
+        try:
+            await handler(event)
+            print(f"[EventBusHandler] Handler '{handler_name}' completed successfully for Event ID: {event.event_id}.")
+        except Exception as e:
+            print(f"[EventBusHandler] ERROR: Handler '{handler_name}' failed for Event ID: {event.event_id}. Error: {type(e).__name__}: {e}")
+            # Add more detailed logging, e.g., traceback.format_exc() if needed
+   # --- End Event Bus Methods ---
+
 
    def get_agent_capabilities_description(self) -> str:
        descriptions = []
@@ -328,60 +424,131 @@ class TerminusOrchestrator:
                descriptions.append(f"- {a.name}: Specializes in '{a.specialty}'. Uses model: {a.model}.{complexity_info}")
        return "\n".join(descriptions) if descriptions else "No active agents available."
 
-   async def _handle_system_event(self, message: Dict):
-       print(f"[EVENT_HANDLER] Msg ID: {message.get('message_id')}, Type: '{message.get('message_type')}', Src: '{message.get('source_agent_name')}', Payload: {message.get('payload')}")
+    async def _handle_system_event(self, event: SystemEvent): # Signature changed to SystemEvent
+       # This method will be re-subscribed to relevant events in Phase 2 if still needed.
+       # For now, its direct subscriptions via _setup_initial_event_listeners are removed.
+       print(f"[LegacyEventHandler] Event ID: {event.event_id}, Type: '{event.event_type}', Src: '{event.source_component}', Payload: {event.payload}")
 
-   def _setup_initial_event_listeners(self):
-       kb_event_types = ["kb.webcontent.added", "kb.code_explanation.added", "kb.code_module.added", "kb.plan_execution_log.added", "kb.document_excerpt.added", "kb.feedback_report.added"]
-       for event_type in kb_event_types:
-           self.subscribe_to_message(event_type, self._handle_system_event)
-           if event_type != "kb.feedback_report.added":
-                self.subscribe_to_message(event_type, self._handle_new_kb_content_for_analysis)
-       self.subscribe_to_message("user.feedback.submitted", self._handle_system_event)
+   async def _event_handler_log_user_feedback(self, event: SystemEvent):
+        """
+        Simple event handler to log when user feedback is submitted.
+        """
+        feedback_id = event.payload.get("feedback_id", "N/A")
+        item_id = event.payload.get("item_id", "N/A")
+        rating = event.payload.get("rating", "N/A")
+        print(f"[UserFeedbackLogger] Received 'user.feedback.submitted' event. Feedback ID: {feedback_id}, Item ID: {item_id}, Rating: {rating}. Event ID: {event.event_id}")
 
-   async def _handle_new_kb_content_for_analysis(self, message: Dict):
-       kb_id = message.get("payload", {}).get("kb_id", "UNKNOWN_KB_ID")
-       handler_id = f"[ContentAnalysisHandler kb_id:{kb_id}]"
-       print(f"{handler_id} START: Processing message type: {message.get('message_type')}")
-       if self.knowledge_collection is None: print(f"{handler_id} ERROR: Knowledge base not available. Skipping analysis."); return
-       if not kb_id or kb_id == "UNKNOWN_KB_ID": print(f"{handler_id} ERROR: No valid kb_id in message payload. Cannot process."); return
+   # _setup_initial_event_listeners REMOVED
+   # publish_message REMOVED
+   # subscribe_to_message REMOVED
+
+   async def _event_handler_kb_content_added(self, event: SystemEvent):
+       """
+       Handles the 'kb.content.added' event to trigger content analysis.
+       Formerly _handle_new_kb_content_for_analysis.
+       """
+       kb_id = event.payload.get("kb_id")
+       source_op = event.payload.get("source_operation", "unknown_source") # Get source from payload
+       handler_id = f"[ContentAnalysisHandler event_id:{event.event_id} kb_id:{kb_id} src_op:{source_op}]"
+
+       # Avoid analyzing feedback reports or plan logs themselves with this generic handler
+       if source_op in ["feedback_analysis_report", "plan_execution_log"]:
+           print(f"{handler_id} INFO: Skipping content analysis for KB item from source operation '{source_op}'.")
+           return
+
+       print(f"{handler_id} START: Processing event type: {event.event_type}")
+       if self.knowledge_collection is None:
+           print(f"{handler_id} ERROR: Knowledge base not available. Skipping analysis."); return
+       if not kb_id:
+           print(f"{handler_id} ERROR: No valid kb_id in event payload. Cannot process."); return
+
        try:
-           item_data = self.knowledge_collection.get(ids=[kb_id], include=["documents"])
-           if not (item_data and item_data.get('ids') and item_data['ids'][0]): print(f"{handler_id} ERROR: KB item not found for analysis."); return
+           item_data = self.knowledge_collection.get(ids=[kb_id], include=["documents", "metadatas"])
+           if not (item_data and item_data.get('ids') and item_data['ids'][0]):
+               print(f"{handler_id} ERROR: KB item '{kb_id}' not found for analysis."); return
+
            document_content = item_data['documents'][0]
-           if not document_content: print(f"{handler_id} INFO: KB item has empty content. Skipping analysis."); return
+           doc_metadata = item_data['metadatas'][0] if item_data.get('metadatas') and item_data['metadatas'][0] else {}
+
+           if not document_content:
+               print(f"{handler_id} INFO: KB item '{kb_id}' has empty content. Skipping analysis."); return
+
+           if doc_metadata.get("analysis_by_agent") == "ContentAnalysisAgent" and \
+              (doc_metadata.get("extracted_keywords") or doc_metadata.get("extracted_topics")):
+               print(f"{handler_id} INFO: Content for KB ID '{kb_id}' already analyzed by ContentAnalysisAgent. Skipping re-analysis.")
+               return
+
            analysis_agent = next((a for a in self.agents if a.name == "ContentAnalysisAgent" and a.active), None)
-           if not analysis_agent: print(f"{handler_id} ERROR: ContentAnalysisAgent not found/active. Skipping."); return
+           if not analysis_agent:
+               print(f"{handler_id} ERROR: ContentAnalysisAgent not found/active. Skipping."); return
+
            analysis_prompt = (f"Analyze the following text content:\n---\n{document_content[:15000]}\n---\n"
-                              f"Provide output as a JSON object with 'keywords' (comma-separated string, or 'NONE') "
-                              f"and 'topics' (1-3 comma-separated strings, or 'NONE').\n"
-                              f"Example: {{\"keywords\": \"k1, k2\", \"topics\": \"T1, T2\"}}\nJSON Output:")
-           print(f"{handler_id} INFO: Calling LLM for analysis.")
-           llm_result = await self.execute_agent(analysis_agent, analysis_prompt)
-           if not (llm_result.get("status") == "success" and llm_result.get("response","").strip()): print(f"{handler_id} ERROR: LLM analysis call failed. Status: {llm_result.get('status')}, Resp: {llm_result.get('response')}"); return
-           print(f"{handler_id} SUCCESS: LLM analysis successful.")
+                              f"Provide output as a JSON object with 'keywords' (comma-separated string of 2-5 relevant keywords, or 'NONE') "
+                              f"and 'topics' (1-3 comma-separated strings describing main topics, or 'NONE').\n"
+                              f"Example: {{\"keywords\": \"k1, k2, k3\", \"topics\": \"Topic A, Topic B\"}}\nJSON Output:")
+
+           print(f"{handler_id} INFO: Calling LLM for content analysis of KB ID '{kb_id}'.")
+           llm_call_or_task = await self.execute_agent(analysis_agent, analysis_prompt)
+
+           llm_result: Optional[Dict] = None
+           if llm_call_or_task.get("status") == "pending_async":
+                analysis_task_id = llm_call_or_task["task_id"]
+                print(f"{handler_id} LLM analysis for KB '{kb_id}' submitted as task {analysis_task_id}. Awaiting result...")
+                while True: # This handler will block for its own LLM call.
+                    await asyncio.sleep(0.2)
+                    task_info = await self.get_async_task_info(analysis_task_id)
+                    if not task_info:
+                        print(f"{handler_id} ERROR: LLM analysis task {analysis_task_id} info not found for KB '{kb_id}'."); return
+                    if task_info.status == AsyncTaskStatus.COMPLETED:
+                        llm_result = task_info.result
+                        break
+                    elif task_info.status == AsyncTaskStatus.FAILED:
+                        print(f"{handler_id} ERROR: LLM analysis task {analysis_task_id} for KB '{kb_id}' failed: {task_info.error}"); return
+                    elif task_info.status == AsyncTaskStatus.CANCELLED:
+                         print(f"{handler_id} ERROR: LLM analysis task {analysis_task_id} for KB '{kb_id}' cancelled."); return
+           else:
+                llm_result = llm_call_or_task
+
+           if not llm_result or not (llm_result.get("status") == "success" and llm_result.get("response","").strip()):
+               print(f"{handler_id} ERROR: LLM analysis call for KB '{kb_id}' failed or produced no response. Status: {llm_result.get('status') if llm_result else 'N/A'}, Resp: {llm_result.get('response') if llm_result else 'N/A'}"); return
+
+           print(f"{handler_id} SUCCESS: LLM analysis for KB '{kb_id}' successful.")
            llm_response_str = llm_result.get("response").strip()
            extracted_keywords, extracted_topics = "", ""
            try:
                data = json.loads(llm_response_str)
-               raw_kw = data.get("keywords","").strip(); extracted_keywords = raw_kw if raw_kw.upper() != "NONE" else ""
-               raw_tp = data.get("topics","").strip(); extracted_topics = raw_tp if raw_tp.upper() != "NONE" else ""
+               raw_kw = data.get("keywords","").strip()
+               extracted_keywords = raw_kw if raw_kw and raw_kw.upper() != "NONE" else ""
+               raw_tp = data.get("topics","").strip()
+               extracted_topics = raw_tp if raw_tp and raw_tp.upper() != "NONE" else ""
            except json.JSONDecodeError:
-               print(f"{handler_id} WARNING: Failed to parse LLM JSON. Raw: '{llm_response_str}'. Using raw as keywords if applicable.")
-               if "keywords" not in llm_response_str.lower() and "topics" not in llm_response_str.lower() and llm_response_str.upper() != "NONE": extracted_keywords = llm_response_str
+               print(f"{handler_id} WARNING: Failed to parse LLM JSON for content analysis of KB '{kb_id}'. Raw: '{llm_response_str}'. Using raw as keywords if applicable and not 'none'.")
+               if "keywords" not in llm_response_str.lower() and "topics" not in llm_response_str.lower() and llm_response_str.upper() != "NONE":
+                   extracted_keywords = llm_response_str[:200]
+
            if extracted_keywords or extracted_topics:
-               new_meta = {"analysis_by_agent": analysis_agent.name, "analysis_model_used": analysis_agent.model, "analysis_timestamp_iso": datetime.datetime.now().isoformat()}
+               new_meta = {
+                   "analysis_by_agent": analysis_agent.name,
+                   "analysis_model_used": analysis_agent.model,
+                   "analysis_timestamp_iso": datetime.datetime.utcnow().isoformat()
+                }
                if extracted_keywords: new_meta["extracted_keywords"] = extracted_keywords
                if extracted_topics: new_meta["extracted_topics"] = extracted_topics
-               print(f"{handler_id} INFO: Attempting metadata update with keywords: '{extracted_keywords}', topics: '{extracted_topics}'.")
-               update_status = await self._update_kb_item_metadata(kb_id, new_meta)
-               if update_status.get("status") == "success": print(f"{handler_id} SUCCESS: Metadata update successful.")
-               else: print(f"{handler_id} ERROR: Metadata update failed. Msg: {update_status.get('message')}")
-           else: print(f"{handler_id} INFO: No keywords or topics extracted. No metadata update.")
-       except Exception as e: print(f"{handler_id} UNHANDLED ERROR: {e}")
-       finally: print(f"{handler_id} END: Finished processing.")
 
-   async def publish_message(self, message_type: str, source_agent_name: str, payload: Dict) -> str:
+               print(f"{handler_id} INFO: Attempting metadata update for KB '{kb_id}' with keywords: '{extracted_keywords}', topics: '{extracted_topics}'.")
+               update_status = await self._update_kb_item_metadata(kb_id, new_meta) # Make sure this is awaited
+               if update_status.get("status") == "success":
+                   print(f"{handler_id} SUCCESS: Metadata update for KB '{kb_id}' successful.")
+               else:
+                   print(f"{handler_id} ERROR: Metadata update for KB '{kb_id}' failed. Msg: {update_status.get('message')}")
+           else:
+               print(f"{handler_id} INFO: No keywords or topics extracted for KB '{kb_id}'. No metadata update.")
+       except Exception as e:
+           print(f"{handler_id} UNHANDLED ERROR in content analysis handler for KB '{kb_id}': {type(e).__name__}: {e}")
+       finally:
+           print(f"{handler_id} END: Finished processing event for KB '{kb_id}'.")
+
+   async def publish_message(self, message_type: str, source_agent_name: str, payload: Dict) -> str: #This is part of the old message bus, will be removed.
        message_id = str(uuid.uuid4()); message = { "message_id": message_id, "message_type": message_type, "source_agent_name": source_agent_name, "timestamp_iso": datetime.datetime.now().isoformat(), "payload": payload }
        print(f"[MessageBus] Publishing: ID={message_id}, Type='{message_type}', Src='{source_agent_name}'")
        for handler in list(self.message_bus_subscribers.get(message_type, [])):
@@ -688,13 +855,34 @@ class TerminusOrchestrator:
 
 
    async def store_knowledge(self, content: str, metadata: Optional[Dict] = None, content_id: Optional[str] = None) -> Dict:
-       if self.knowledge_collection is None: return {"status": "error", "message": "KB not initialized."}
+       if self.knowledge_collection is None:
+           return {"status": "error", "message": "KB not initialized."}
        try:
            final_id = content_id or str(uuid.uuid4())
-           clean_meta = {k: (str(v) if not isinstance(v, (str,int,float,bool)) else v) for k,v in metadata.items()} if metadata else {}
-           self.knowledge_collection.add(ids=[final_id], documents=[content], metadatas=[clean_meta] if clean_meta else [None])
-           return {"status": "success", "id": final_id, "message": "Content stored."}
-       except Exception as e: return {"status": "error", "message": str(e)}
+           # Ensure metadata is suitable for ChromaDB (basic types) and also for event payload.
+           # For ChromaDB, it will convert non-string/int/float/bool values.
+           # For event payload, we might want to keep original structure if more complex.
+           chroma_meta = {k: (str(v) if not isinstance(v, (str, int, float, bool)) else v) for k, v in metadata.items()} if metadata else {}
+
+           self.knowledge_collection.add(ids=[final_id], documents=[content], metadatas=[chroma_meta] if chroma_meta else [None])
+
+           # Publish event after successful storage
+           event_payload = {
+               "kb_id": final_id,
+               "content_preview": content[:200] + "..." if len(content) > 200 else content, # Keep preview reasonable
+               "metadata": metadata if metadata else {}, # Send original metadata in event
+               "source_operation": metadata.get("source", "unknown") if metadata else "unknown" # e.g. "web_scrape", "plan_execution_log"
+           }
+           await self.publish_event(
+               event_type="kb.content.added",
+               source_component="TerminusOrchestrator.KnowledgeBase",
+               payload=event_payload
+           )
+           print(f"[store_knowledge] Successfully stored and published kb.content.added event for KB ID: {final_id}")
+           return {"status": "success", "id": final_id, "message": "Content stored and event published."}
+       except Exception as e:
+           print(f"[store_knowledge] Error storing to KB or publishing event: {e}")
+           return {"status": "error", "message": str(e)}
 
    async def retrieve_knowledge(self, query_text: str, n_results: int = 5, filter_metadata: Optional[Dict] = None) -> Dict:
         if self.knowledge_collection is None: return {"status": "error", "results": [], "message": "KB not initialized."}
@@ -710,11 +898,43 @@ class TerminusOrchestrator:
 
    def store_user_feedback(self, item_id: str, item_type: str, rating: str, comment: Optional[str]=None, current_mode: Optional[str]=None, user_prompt_preview: Optional[str]=None) -> bool:
        try:
-           data = {"feedback_id":str(uuid.uuid4()), "timestamp_iso":datetime.datetime.now().isoformat(), "item_id":str(item_id), "item_type":str(item_type), "rating":str(rating), "comment":comment or "", "user_context":{"operation_mode":current_mode, "related_user_prompt_preview":user_prompt_preview[:200] if user_prompt_preview else None}}
-           with open(self.feedback_log_file_path, 'a', encoding='utf-8') as f: f.write(json.dumps(data) + '\n')
-           asyncio.create_task(self.publish_message("user.feedback.submitted", "UserFeedbackSystem", {"feedback_id":data["feedback_id"]}))
+           feedback_id = str(uuid.uuid4())
+           timestamp_iso = datetime.datetime.utcnow().isoformat() # Use UTC
+
+           data_to_log = {
+               "feedback_id": feedback_id,
+               "timestamp_iso": timestamp_iso,
+               "item_id": str(item_id),
+               "item_type": str(item_type),
+               "rating": str(rating),
+               "comment": comment or "",
+               "user_context":{
+                   "operation_mode":current_mode,
+                   "related_user_prompt_preview":user_prompt_preview[:200] if user_prompt_preview else None
+                }
+            }
+           with open(self.feedback_log_file_path, 'a', encoding='utf-8') as f:
+               f.write(json.dumps(data_to_log) + '\n')
+
+           # Publish to the new event bus
+           event_payload = {
+               "feedback_id": feedback_id,
+               "item_id": str(item_id),
+               "item_type": str(item_type),
+               "rating": str(rating),
+               "comment_preview": (comment[:75] + "...") if comment and len(comment) > 75 else (comment or ""),
+               "timestamp_iso": timestamp_iso
+           }
+           asyncio.create_task(self.publish_event(
+               event_type="user.feedback.submitted",
+               source_component="TerminusOrchestrator.FeedbackSystem", # Or simply "UserFeedbackSystem"
+               payload=event_payload
+           ))
+           print(f"[store_user_feedback] Feedback {feedback_id} stored and event published.")
            return True
-       except Exception as e: print(f"ERROR storing feedback: {e}"); return False
+       except Exception as e:
+           print(f"ERROR storing feedback or publishing event: {e}")
+           return False
 
    async def generate_and_store_feedback_report(self) -> Dict:
        report_handler_id = "[FeedbackReport]"
@@ -746,11 +966,25 @@ class TerminusOrchestrator:
            if store_res.get("status") == "success":
                msg = f"Feedback report stored. KB ID: {store_res.get('id')}"
                print(f"{report_handler_id} SUCCESS: {msg}")
-               asyncio.create_task(self.publish_message("kb.feedback_report.added","FeedbackAnalyzerSystem",{"report_id":kb_meta.get('report_id'),"kb_id":store_res.get("id")}))
+                # Event "kb.content.added" is already published by store_knowledge.
+                # If a more specific "kb.feedback_report.added" event is desired, it can be published here too.
+                # For now, we rely on the generic one. The metadata['source'] == 'feedback_analysis_report'
+                # in the generic event's payload can be used by subscribers to differentiate.
+                # Example of specific event:
+                # await self.publish_event(
+                # event_type="kb.feedback_report.added",
+                # source_component="FeedbackAnalyzerSystem",
+                #     payload={"report_id": kb_meta.get('report_id'), "kb_id": store_res.get("id")}
+                # )
                return {"status":"success", "message":msg, "kb_id":store_res.get("id")}
-           else: print(f"{report_handler_id} ERROR: Failed to store report in KB. Msg: {store_res.get('message')}"); return store_res
-       except Exception as e: print(f"{report_handler_id} UNHANDLED ERROR: {e}"); return {"status":"error","message":str(e)}
-       finally: print(f"{report_handler_id} END: Processing finished.")
+            else:
+                print(f"{report_handler_id} ERROR: Failed to store report in KB. Msg: {store_res.get('message')}")
+                return store_res
+        except Exception as e:
+            print(f"{report_handler_id} UNHANDLED ERROR: {e}")
+            return {"status":"error","message":str(e)}
+        finally:
+            print(f"{report_handler_id} END: Processing finished.")
 
    async def _update_kb_item_metadata(self, kb_id: str, new_metadata_fields: Dict) -> Dict:
        if self.knowledge_collection is None: return {"status": "error", "message": "KB not initialized."}
@@ -1241,27 +1475,54 @@ class TerminusOrchestrator:
        else: s_count = sum(1 for r in final_exec_results if r.get('status')=='success'); return f"Plan execution attempt finished. {s_count}/{len(final_exec_results)} steps successful. Summarization failed: {res.get('response')}"
 
    async def _store_plan_execution_log_in_kb(self, user_prompt_orig:str, nlu_output_orig:Dict, plan_json_final_attempt:str, final_status_bool:bool, num_attempts:int, step_results_final_attempt:List[Dict], outputs_final_attempt:Dict, user_facing_summary_text:str) -> Optional[str]:
-       if not self.knowledge_collection: print("MasterPlanner: Knowledge Base unavailable, skipping storage of plan execution summary."); return None
+       if not self.knowledge_collection:
+           print("MasterPlanner: Knowledge Base unavailable, skipping storage of plan execution summary.");
+           return None
+
        final_plan_status_str = "success" if final_status_bool else "failure"
+       # ... (rest of the summary_dict and kb_meta construction remains the same) ...
        summary_list_for_log = [{"step_id":s.get("step_id","N/A"), "agent_name":s.get("agent","N/A"), "status":s.get("status","unknown"), "response_preview":str(s.get("response",""))[:150]+"..."} for s in step_results_final_attempt]
        nlu_analysis_data = {}
        if isinstance(nlu_output_orig, dict): nlu_analysis_data = { "intent":nlu_output_orig.get("intent"), "intent_scores":nlu_output_orig.get("intent_scores"), "entities":nlu_output_orig.get("entities",[]) }
-       summary_dict = { "version":"1.3_service_calls_rl_log_v1", "original_user_request":user_prompt_orig, "nlu_analysis_on_request": nlu_analysis_data, "plan_json_executed_final_attempt":plan_json_final_attempt, "execution_summary":{ "overall_status":final_plan_status_str, "total_attempts":num_attempts, "final_attempt_step_results":summary_list_for_log, "outputs_from_successful_steps_final_attempt": {k: (str(v)[:200]+"..." if len(str(v)) > 200 else v) for k,v in outputs_final_attempt.items()} }, "user_facing_plan_outcome_summary":user_facing_summary_text, "log_timestamp_iso":datetime.datetime.now().isoformat() }
+       summary_dict = { "version":"1.3_service_calls_rl_log_v1", "original_user_request":user_prompt_orig, "nlu_analysis_on_request": nlu_analysis_data, "plan_json_executed_final_attempt":plan_json_final_attempt, "execution_summary":{ "overall_status":final_plan_status_str, "total_attempts":num_attempts, "final_attempt_step_results":summary_list_for_log, "outputs_from_successful_steps_final_attempt": {k: (str(v)[:200]+"..." if len(str(v)) > 200 else v) for k,v in outputs_final_attempt.items()} }, "user_facing_plan_outcome_summary":user_facing_summary_text, "log_timestamp_iso":datetime.datetime.utcnow().isoformat() }
        content_str = json.dumps(summary_dict, indent=2)
-       kb_meta = { "source":"plan_execution_log", "overall_status":final_plan_status_str, "user_request_preview":user_prompt_orig[:150], "primary_intent":nlu_analysis_data.get("intent","N/A"), "log_timestamp_iso":summary_dict["log_timestamp_iso"] }
+       kb_meta = {
+           "source":"plan_execution_log",
+           "overall_status":final_plan_status_str,
+           "user_request_preview":user_prompt_orig[:150],
+           "primary_intent":nlu_analysis_data.get("intent","N/A"),
+           "log_timestamp_iso":summary_dict["log_timestamp_iso"]
+       }
        if nlu_analysis_data.get("entities"):
-           for i, ent in enumerate(nlu_analysis_data["entities"][:3]): kb_meta[f"entity_{i+1}_type"]=ent.get("type","UNK"); kb_meta[f"entity_{i+1}_text"]=str(ent.get("text",""))[:50]
-       kb_store_coro = self.store_knowledge(content_str, kb_meta)
-       stored_kb_id = None
-       async def _publish_after_plan_log_store():
-           nonlocal stored_kb_id
-           kb_res = await kb_store_coro
-           if kb_res.get("status")=="success":
-               stored_kb_id = kb_res.get("id")
-               await self.publish_message("kb.plan_execution_log.added", "MasterPlanner", payload={"kb_id":stored_kb_id, "original_request_preview":user_prompt_orig[:150], "overall_status":final_plan_status_str, "primary_intent":nlu_analysis_data.get("intent","N/A")})
-       await _publish_after_plan_log_store()
-       print(f"MasterPlanner: Plan log storage and publish task processing finished. Stored KB ID: {stored_kb_id}")
-       return stored_kb_id
+           for i, ent in enumerate(nlu_analysis_data["entities"][:3]):
+               kb_meta[f"entity_{i+1}_type"]=ent.get("type","UNK")
+               kb_meta[f"entity_{i+1}_text"]=str(ent.get("text",""))[:50]
+
+       # Call store_knowledge, which will now publish the "kb.content.added" event internally
+       store_result = await self.store_knowledge(content_str, kb_meta, content_id=f"planlog_{uuid.uuid4()}")
+
+       if store_result.get("status") == "success":
+           stored_kb_id = store_result.get("id")
+           print(f"MasterPlanner: Plan log storage successful. Stored KB ID: {stored_kb_id}")
+           # No direct publish_message here anymore; store_knowledge handles the generic kb.content.added event.
+           # If a more specific event "kb.plan_execution_log.added" is needed, store_knowledge
+           # could be made more flexible, or we could publish that specific event here too.
+           # For now, relying on the generic event from store_knowledge.
+           # Example of publishing a more specific event if needed:
+           # await self.publish_event(
+           # event_type="kb.plan_execution_log.added",
+           # source_component="MasterPlanner",
+           #     payload={
+           # "kb_id": stored_kb_id,
+           # "original_request_preview": user_prompt_orig[:150],
+           # "overall_status": final_plan_status_str,
+           # "primary_intent": nlu_analysis_data.get("intent", "N/A")
+           #     }
+           # )
+           return stored_kb_id
+       else:
+           print(f"MasterPlanner: Plan log storage failed. Message: {store_result.get('message')}")
+           return None
 
    async def execute_agent(self, agent: Agent, prompt: str, context: Optional[Dict] = None) -> Dict:
         print(f"Orchestrator: Executing agent {agent.name} with prompt (first 100 chars): {prompt[:100]}")
@@ -1279,13 +1540,28 @@ class TerminusOrchestrator:
                     doc_summarizer_agent = next((a for a in self.agents if a.name == "DocSummarizer" and a.active), None)
                     if doc_summarizer_agent:
                         summary_prompt = f"Please summarize the following web page content obtained from {url_to_scrape}:\n\n{text_content[:15000]}"
+                        # This internal _ollama_generate call could also be made an async task if summarization is slow
+                        # For now, WebCrawler awaits it directly.
                         summary_result = await self._ollama_generate(doc_summarizer_agent.model, summary_prompt, context)
                         if summary_result.get("status") == "success" and summary_result.get("response"): summary = summary_result.get("response")
-                    kb_metadata = {"source": "web_scrape", "url": url_to_scrape, "scraped_timestamp_iso": datetime.datetime.now().isoformat(), "original_content_length": len(text_content), "agent_used": agent.name, "summarizer_used": doc_summarizer_agent.name if doc_summarizer_agent else "N/A"}
-                    # WebCrawler's store_knowledge can also be made async if it becomes complex
-                    # For now, keeping it as is, but it's a candidate for future async task submission.
-                    asyncio.create_task(self.store_knowledge(content=summary, metadata=kb_metadata))
-                    return {"status": "success", "agent": agent.name, "model": agent.model, "response_type": "scrape_result", "response": f"Successfully scraped and summarized content from {url_to_scrape}. Summary has been stored in the Knowledge Base.", "summary": summary, "original_url": url_to_scrape, "full_content_length": len(text_content)}
+
+                    kb_metadata = {
+                        "source": "web_scrape",
+                        "url": url_to_scrape,
+                        "scraped_timestamp_iso": datetime.datetime.utcnow().isoformat(), # Use UTC
+                        "original_content_length": len(text_content),
+                        "agent_used": agent.name,
+                        "summarizer_used": doc_summarizer_agent.name if doc_summarizer_agent else "N/A"
+                    }
+                    # Await store_knowledge to ensure event is published if successful
+                    store_kb_result = await self.store_knowledge(content=summary, metadata=kb_metadata)
+                    if store_kb_result.get("status") == "success":
+                        print(f"WebCrawler: Successfully stored scraped content from {url_to_scrape} to KB (ID: {store_kb_result.get('id')}).")
+                        return {"status": "success", "agent": agent.name, "model": agent.model, "response_type": "scrape_result", "response": f"Successfully scraped and summarized content from {url_to_scrape}. Summary stored in KB (ID: {store_kb_result.get('id')}).", "summary": summary, "original_url": url_to_scrape, "full_content_length": len(text_content), "kb_id": store_kb_result.get("id")}
+                    else:
+                        print(f"WebCrawler: Failed to store scraped content from {url_to_scrape} to KB. Error: {store_kb_result.get('message')}")
+                        return {"status": "error", "agent": agent.name, "model": agent.model, "response_type": "scrape_kb_store_error", "response": f"Error storing scraped content for {url_to_scrape}: {store_kb_result.get('message')}"}
+
                 except Exception as e:
                     return {"status": "error", "agent": agent.name, "model": agent.model, "response_type": "scrape_error", "response": f"Error scraping URL {url_to_scrape}: {str(e)}"}
             else: # WebCrawler performing a search query
