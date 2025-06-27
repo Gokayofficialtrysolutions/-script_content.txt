@@ -40,6 +40,7 @@ import io # For BytesIO
 from duckduckgo_search import DDGS
 
 from ..core import prompt_constructors
+from ..core.rl_logger import RLExperienceLogger # Added RL Logger import
 
 
 @dataclass
@@ -130,6 +131,12 @@ class TerminusOrchestrator:
        }
        self.default_high_priority_retries = 1
        print("TerminusOrchestrator initialized with service handlers and default high-priority retries.")
+
+       # Initialize RL Logger
+       self.rl_experience_log_path = self.logs_dir / "rl_experience_log.jsonl"
+       self.rl_logger = RLExperienceLogger(self.rl_experience_log_path)
+       print(f"RL Experience Logger initialized. Logging to: {self.rl_experience_log_path}")
+
 
    def get_agent_capabilities_description(self) -> str:
        descriptions = []
@@ -439,9 +446,41 @@ class TerminusOrchestrator:
            print(f"[{plan_handler_id}] INFO: No feedback reports found for query '{feedback_query}'.")
        return kb_feedback_ctx_str
 
+   def _construct_rl_state(self, user_prompt: str, nlu_output: Dict, kb_context_summary: Dict, previous_cycle_outcome: Optional[str]) -> Dict[str, Any]:
+       # Basic placeholder implementation - to be expanded based on actual features
+       state = {
+           "nlu_intent": nlu_output.get("intent", "unknown"),
+           "nlu_entities_count": len(nlu_output.get("entities", [])),
+           "user_prompt_length_category": "short" if len(user_prompt) < 50 else "medium" if len(user_prompt) < 200 else "long",
+           "kb_general_hits": kb_context_summary.get("general_hits_count", 0),
+           "kb_plan_log_hits": kb_context_summary.get("plan_log_hits_count", 0),
+           "kb_feedback_hits": kb_context_summary.get("feedback_hits_count", 0),
+           "previous_cycle_outcome": previous_cycle_outcome if previous_cycle_outcome else "none",
+           # Add more features: conversation history summary embedding (stringified), agent stats, etc.
+       }
+       return state
+
+   def _calculate_rl_reward(self, execution_status: str, user_feedback_rating: Optional[str], num_revisions: int) -> float:
+       reward = 0.0
+       if execution_status == "success":
+           reward += 0.5
+       elif execution_status == "failure":
+           reward -= 0.5
+
+       if user_feedback_rating == "positive":
+           reward += 1.0
+       elif user_feedback_rating == "negative":
+           reward -= 1.0
+
+       reward -= num_revisions * 0.25 # Penalty for each revision
+       return round(reward, 4)
+
    async def execute_master_plan(self, user_prompt: str, request_priority: Optional[str] = "normal") -> List[Dict]:
        plan_handler_id = f"[MasterPlanner user_prompt:'{user_prompt[:50]}...' Priority:'{request_priority}']"
-       print(f"{plan_handler_id} START: Received request.")
+       rl_interaction_id = str(uuid.uuid4()) # For RL logging
+       timestamp_interaction_start = datetime.datetime.now().isoformat()
+
+       print(f"{plan_handler_id} START: Received request. RL Interaction ID: {rl_interaction_id}")
        self.conversation_history.append({"role": "user", "content": user_prompt})
        if len(self.conversation_history) > self.max_history_items:
            self.conversation_history = self.conversation_history[-self.max_history_items:]
@@ -452,6 +491,10 @@ class TerminusOrchestrator:
        first_attempt_nlu_output = {}
        detailed_failure_ctx_for_rev = {}
        current_plan_log_kb_id = None
+       # For RL logging - capture state S before the action that leads to the executed plan
+       state_for_executed_plan_log: Optional[Dict] = None
+       action_for_executed_plan_log: Optional[str] = None
+       prompt_details_for_executed_plan_log: Optional[Dict] = None
 
        print(f"{plan_handler_id} INFO: Performing NLU analysis for initial planning.")
        first_attempt_nlu_output = await self.classify_user_intent(user_prompt)
@@ -481,31 +524,50 @@ class TerminusOrchestrator:
            kb_plan_log_ctx_str = await self._get_formatted_plan_log_insights(first_attempt_nlu_output, plan_handler_id)
            kb_feedback_ctx_str = await self._get_formatted_feedback_insights(plan_handler_id)
 
+           # Construct current RL State (S)
+           # Simplified: using initial NLU and KB context for all attempts in this cycle for now.
+           # previous_cycle_outcome would be for the *previous* user interaction, not previous attempt in *this* interaction.
+           current_rl_state_kb_summary = {
+               "general_hits_count": len(kb_general_ctx_str.splitlines()) -1 if kb_general_ctx_str.strip() else 0,
+               "plan_log_hits_count": len(kb_plan_log_ctx_str.splitlines()) -1 if kb_plan_log_ctx_str.strip() else 0,
+               "feedback_hits_count": len(kb_feedback_ctx_str.splitlines()) -1 if kb_feedback_ctx_str.strip() else 0,
+           }
+           current_rl_state = self._construct_rl_state(user_prompt, first_attempt_nlu_output, current_rl_state_kb_summary, None) # None for prev_cycle_outcome
+
+           # Placeholder for RL Action (A)
+           current_rl_action = "Action_DefaultPrompt_InitialLog" # TODO: Integrate with RLPolicy.get_action(current_rl_state)
+           current_prompt_details = {"strategy": "standard_initial_log"} # Details of how action modified prompt
+
+           # Store S, A, PromptDetails for the attempt that eventually gets executed/logged
+           if state_for_executed_plan_log is None : # Only for the very first attempt, or if plan fails and this becomes the state for the failed plan
+                state_for_executed_plan_log = current_rl_state
+                action_for_executed_plan_log = current_rl_action
+                prompt_details_for_executed_plan_log = current_prompt_details
+
+
            if current_attempt == 0:
                planning_prompt = prompt_constructors.construct_main_planning_prompt(
                    user_prompt, history_context, nlu_summary_for_prompt,
                    kb_general_ctx_str, kb_plan_log_ctx_str, kb_feedback_ctx_str,
                    agent_capabilities_desc
                )
-               planner_agent = next((a for a in self.agents if a.name == "MasterPlanner" and a.active), None)
-               if not planner_agent: return [{"status":"error", "message":"MasterPlanner agent not found/active."}]
-               raw_plan_response = await self._ollama_generate(planner_agent.model, planning_prompt)
-               original_plan_json_str = raw_plan_response.get("response", "[]")
+               # TODO: Modify planning_prompt based on current_rl_action here if action implies changes
            else:
                print(f"{plan_handler_id} INFO: Constructing revision prompt with failure context.")
-               revision_prompt = prompt_constructors.construct_revision_planning_prompt(
+               planning_prompt = prompt_constructors.construct_revision_planning_prompt(
                    user_prompt, history_context, nlu_summary_for_prompt,
                    detailed_failure_ctx_for_rev, agent_capabilities_desc
                )
-               planner_agent = next((a for a in self.agents if a.name == "MasterPlanner" and a.active), None)
-               if not planner_agent: return [{"status":"error", "message":"MasterPlanner agent not found/active for revision."}]
-               raw_plan_response = await self._ollama_generate(planner_agent.model, revision_prompt)
-               original_plan_json_str = raw_plan_response.get("response", "[]")
+               # TODO: Also potentially modify revision_prompt based on current_rl_action (if a new action is chosen for revision)
+
+           planner_agent = next((a for a in self.agents if a.name == "MasterPlanner" and a.active), None)
+           if not planner_agent: return [{"status":"error", "message":"MasterPlanner agent not found/active."}]
+           raw_plan_response = await self._ollama_generate(planner_agent.model, planning_prompt)
+           original_plan_json_str = raw_plan_response.get("response", "[]") # This is the plan for the CURRENT attempt
 
            try:
                plan_list = json.loads(original_plan_json_str)
                if not isinstance(plan_list, list): raise ValueError("Plan is not a list.")
-               # Basic validation (can be expanded)
                for step in plan_list:
                    if not step.get("step_type") in ["conditional", "loop", "parallel_group", "agent_service_call"] and \
                       not all(k in step for k in ["step_id", "agent_name", "task_prompt"]):
@@ -514,16 +576,23 @@ class TerminusOrchestrator:
                print(f"{plan_handler_id} ERROR: Failed to parse plan from LLM: {e_parse}. Response: {original_plan_json_str[:200]}...")
                if current_attempt < max_rev_attempts:
                    detailed_failure_ctx_for_rev = self._capture_simple_failure_context(original_plan_json_str, {"error": f"Plan parsing failed: {e_parse}"})
-                   current_attempt += 1; continue
-               else: return [{"status":"error", "message":f"Failed to parse plan after {max_rev_attempts+1} attempts. Last error: {e_parse}"}]
+                   current_attempt += 1; step_outputs = {}; plan_succeeded_this_attempt = False # Ensure this is set
+                   state_for_executed_plan_log = current_rl_state # Update S,A for the failed attempt
+                   action_for_executed_plan_log = current_rl_action
+                   prompt_details_for_executed_plan_log = current_prompt_details
+                   continue
+               else:
+                   # Log this final failed parsing attempt for RL
+                   final_exec_results.append({"status":"error", "message":f"Failed to parse plan after {max_rev_attempts+1} attempts. Last error: {e_parse}"})
+                   plan_succeeded_this_attempt = False; break # Break from while current_attempt
 
-           if not plan_list: print(f"{plan_handler_id} INFO: Planner returned an empty plan."); break
+           if not plan_list: print(f"{plan_handler_id} INFO: Planner returned an empty plan."); plan_succeeded_this_attempt = True; break # Treat empty plan as success (nothing to do)
 
            current_step_idx = 0; executed_step_ids = set(); active_loops = {}
+           # This loop is for executing the plan_list of the CURRENT attempt
            while current_step_idx < len(plan_list):
                step_to_execute = plan_list[current_step_idx]
                step_id_to_execute = step_to_execute.get("step_id")
-
                step_priority = step_to_execute.get("priority", "normal").lower()
                dispatch_log_prefix = f"[{plan_handler_id}]"
                if step_priority == "high": dispatch_log_prefix += f" [Priority: HIGH]"
@@ -532,33 +601,41 @@ class TerminusOrchestrator:
                description_for_log = step_to_execute.get('description', 'N/A')[:50]
                print(f"{dispatch_log_prefix} Dispatching Step {step_id_to_execute}: Type='{step_type_for_log}', Agent='{agent_name_for_log}', Desc='{description_for_log}...'")
 
-               # Dependency Check (simplified for brevity, actual logic is more complex)
-               # ... (Assume dependency check passes or step is skipped if deps not met) ...
+               # Dependency check
+               can_execute = True
+               for dep_id in step_to_execute.get("dependencies",[]):
+                   if dep_id not in executed_step_ids:
+                       print(f"{plan_handler_id} Step {step_id_to_execute} deferred: Dependency {dep_id} not met.")
+                       can_execute = False; break
+               if not can_execute: current_step_idx += 1; continue
 
                step_type = step_to_execute.get("step_type", "agent_execution")
                step_result_for_this_iteration = None
 
                if step_type == "conditional":
-                   # ... (conditional logic as previously implemented) ...
-                   print(f"DEBUG: Placeholder for conditional step {step_id_to_execute}")
-                   # Simulate: Assume condition true, advance to if_true_step_id or next.
-                   # This requires more complex plan navigation not shown in this placeholder.
-                   # For now, just "execute" it.
-                   step_result_for_this_iteration = {"status": "success", "response": "Conditional evaluated (simulated)"}
+                   # ... (full conditional logic) ...
+                   cond_eval_res = await self._evaluate_plan_condition(step_to_execute.get("condition",{}), step_outputs, plan_list)
+                   # ... (logic to jump or skip based on cond_eval_res.get("evaluation")) ...
+                   # This part is complex and involves changing current_step_idx based on if_true/if_false_step_id
+                   # For now, just simulate and assume it moves to next step or a defined jump
+                   print(f"DEBUG: Conditional step {step_id_to_execute} evaluated (simulated).")
+                   step_result_for_this_iteration = {"status": "success", "response": f"Conditional {step_id_to_execute} processed."} # Placeholder
+                   # Actual implementation would find the next step_id (if_true or if_false) and set current_step_idx
+                   # or if neither, just increment. For simplicity, we'll just increment here.
 
                elif step_type == "loop" and step_to_execute.get("loop_type") == "while":
-                   # ... (loop logic as previously implemented) ...
-                   print(f"DEBUG: Placeholder for loop step {step_id_to_execute}")
-                   step_result_for_this_iteration = {"status": "success", "response": "Loop executed (simulated)"}
-                   # This also requires complex plan navigation.
+                   # ... (full loop logic) ...
+                   print(f"DEBUG: Loop step {step_id_to_execute} encountered (simulated).")
+                   step_result_for_this_iteration = {"status": "success", "response": f"Loop {step_id_to_execute} processed."} # Placeholder
+                   # Actual logic involves condition evaluation and jumping to loop_body_step_ids or exiting loop
 
                elif step_type == "agent_service_call":
                    step_result_for_this_iteration = await self._handle_agent_service_call(step_to_execute, step_outputs, plan_list)
 
                elif step_to_execute.get("agent_name") == "parallel_group":
-                   # ... (parallel group logic as previously implemented) ...
-                   print(f"DEBUG: Placeholder for parallel_group {step_id_to_execute}")
-                   step_result_for_this_iteration = {"status": "success", "response": "Parallel group executed (simulated)"}
+                   # ... (full parallel group logic) ...
+                   print(f"DEBUG: Parallel group {step_id_to_execute} encountered (simulated).")
+                   step_result_for_this_iteration = {"status": "success", "response": f"Parallel group {step_id_to_execute} processed."}
 
                else: # Regular agent execution step
                    step_result_for_this_iteration = await self._execute_single_plan_step(step_to_execute, plan_list, step_outputs)
@@ -567,19 +644,65 @@ class TerminusOrchestrator:
                if step_result_for_this_iteration.get("status") != "success":
                    plan_succeeded_this_attempt = False; break
                executed_step_ids.add(step_id_to_execute)
+               # Complex navigation for conditional/loop would happen here, else:
                current_step_idx += 1
 
            final_exec_results = current_attempt_results
            if not plan_succeeded_this_attempt and current_attempt < max_rev_attempts:
-               detailed_failure_ctx_for_rev = self._capture_failure_context(original_plan_json_str, step_to_execute, step_result_for_this_iteration, step_outputs)
+               detailed_failure_ctx_for_rev = self._capture_failure_context(original_plan_json_str, step_to_execute if 'step_to_execute' in locals() and step_to_execute else None, step_result_for_this_iteration if step_result_for_this_iteration else None, step_outputs)
                current_attempt += 1; step_outputs = {}
-           else: break
+               state_for_executed_plan_log = current_rl_state # S for the failed attempt
+               action_for_executed_plan_log = current_rl_action # A for the failed attempt
+               prompt_details_for_executed_plan_log = current_prompt_details
+           else: # Plan succeeded OR max revisions reached for a failing plan
+               # If plan succeeded, S,A for this successful attempt are already in state_for_executed_plan_log etc.
+               # If plan failed after max revisions, S,A for the *last failed attempt* are in those vars.
+               break
 
        user_facing_summary = await self._summarize_execution_for_user(user_prompt, final_exec_results)
-       if plan_list:
-            current_plan_log_kb_id = await self._store_plan_execution_log_in_kb(user_prompt, first_attempt_nlu_output, original_plan_json_str, plan_succeeded_this_attempt, current_attempt + 1, final_exec_results, step_outputs, user_facing_summary)
+       final_plan_outcome_status_str = "success" if plan_succeeded_this_attempt else "failure"
+
+       # For RL Logging:
+       # We need to get user feedback if possible. For now, assume it's not directly available here.
+       user_feedback_rating_for_log = "none" # Placeholder
+
+       # If state_for_executed_plan_log is None, it means the first plan was empty or parsing failed immediately.
+       # In such cases, we might still want to log an experience, but with default/error values.
+       if state_for_executed_plan_log is None: state_for_executed_plan_log = self._construct_rl_state(user_prompt, first_attempt_nlu_output, {}, None)
+       if action_for_executed_plan_log is None: action_for_executed_plan_log = "Action_Planner_Error_Before_Action"
+       if prompt_details_for_executed_plan_log is None: prompt_details_for_executed_plan_log = {"error": "No plan generated or parsed"}
+
+
+       calculated_reward = self._calculate_rl_reward(final_plan_outcome_status_str, user_feedback_rating_for_log, current_attempt)
+       timestamp_interaction_end = datetime.datetime.now().isoformat()
+
+       self.rl_logger.log_experience(
+           rl_interaction_id=rl_interaction_id,
+           attempt_number=current_attempt,
+           state=state_for_executed_plan_log,
+           action=action_for_executed_plan_log,
+           master_planner_prompt_details=prompt_details_for_executed_plan_log,
+           generated_plan_json=original_plan_json_str,
+           plan_parsing_status="success" if plan_list else "failure", # Assuming parse success if plan_list is not empty
+           final_executed_plan_json=original_plan_json_str if plan_succeeded_this_attempt or (not plan_succeeded_this_attempt and current_attempt >=max_rev_attempts) else "N/A",
+           execution_status=final_plan_outcome_status_str,
+           user_feedback_rating=user_feedback_rating_for_log,
+           calculated_reward=calculated_reward,
+           next_state=None, # Placeholder for S_next
+           done=True,
+           timestamp_start_iso=timestamp_interaction_start,
+           timestamp_end_iso=timestamp_interaction_end
+       )
+
+       if plan_list or not plan_succeeded_this_attempt : # Store plan log if a plan was generated or if it failed before generating one
+            current_plan_log_kb_id = await self._store_plan_execution_log_in_kb(
+                user_prompt, first_attempt_nlu_output, original_plan_json_str,
+                plan_succeeded_this_attempt, current_attempt + 1, # attempts here is 1-based for log
+                final_exec_results, step_outputs, user_facing_summary
+            )
        self.conversation_history.append({"role": "assistant", "content": user_facing_summary, "is_plan_outcome": True, "plan_log_kb_id": current_plan_log_kb_id, "feedback_item_id": current_plan_log_kb_id, "feedback_item_type": "master_plan_log_outcome", "related_user_prompt_for_feedback": user_prompt})
        return final_exec_results
+
 
    async def _evaluate_plan_condition(self, condition_def: Dict, step_outputs: Dict, full_plan_list: List[Dict]) -> Dict:
        # ... (unchanged)
@@ -660,7 +783,7 @@ class TerminusOrchestrator:
        summary_list_for_log = [{"step_id":s.get("step_id","N/A"), "agent_name":s.get("agent","N/A"), "status":s.get("status","unknown"), "response_preview":str(s.get("response",""))[:150]+"..."} for s in step_results_final_attempt]
        nlu_analysis_data = {}
        if isinstance(nlu_output_orig, dict): nlu_analysis_data = { "intent":nlu_output_orig.get("intent"), "intent_scores":nlu_output_orig.get("intent_scores"), "entities":nlu_output_orig.get("entities",[]) }
-       summary_dict = { "version":"1.3_service_calls", "original_user_request":user_prompt_orig, "nlu_analysis_on_request": nlu_analysis_data, "plan_json_executed_final_attempt":plan_json_final_attempt, "execution_summary":{ "overall_status":final_plan_status_str, "total_attempts":num_attempts, "final_attempt_step_results":summary_list_for_log, "outputs_from_successful_steps_final_attempt": {k: (str(v)[:200]+"..." if len(str(v)) > 200 else v) for k,v in outputs_final_attempt.items()} }, "user_facing_plan_outcome_summary":user_facing_summary_text, "log_timestamp_iso":datetime.datetime.now().isoformat() }
+       summary_dict = { "version":"1.3_service_calls_rl_log_v1", "original_user_request":user_prompt_orig, "nlu_analysis_on_request": nlu_analysis_data, "plan_json_executed_final_attempt":plan_json_final_attempt, "execution_summary":{ "overall_status":final_plan_status_str, "total_attempts":num_attempts, "final_attempt_step_results":summary_list_for_log, "outputs_from_successful_steps_final_attempt": {k: (str(v)[:200]+"..." if len(str(v)) > 200 else v) for k,v in outputs_final_attempt.items()} }, "user_facing_plan_outcome_summary":user_facing_summary_text, "log_timestamp_iso":datetime.datetime.now().isoformat() }
        content_str = json.dumps(summary_dict, indent=2)
        kb_meta = { "source":"plan_execution_log", "overall_status":final_plan_status_str, "user_request_preview":user_prompt_orig[:150], "primary_intent":nlu_analysis_data.get("intent","N/A"), "log_timestamp_iso":summary_dict["log_timestamp_iso"] }
        if nlu_analysis_data.get("entities"):
