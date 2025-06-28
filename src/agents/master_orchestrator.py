@@ -86,19 +86,24 @@ class TerminusOrchestrator:
        self.service_handlers: Dict[Tuple[str, str], Callable[..., Coroutine[Any, Any, Dict]]] = {}
 
        # --- Structures for Asynchronous Task Management ---
-       # Stores the actual asyncio.Task objects for currently running tasks.
-       # Keyed by task_id (str).
+       # self.active_async_tasks: Stores the actual asyncio.Task objects for currently running tasks, keyed by task_id.
+       # These are the raw tasks that are being awaited by the system.
        self.active_async_tasks: Dict[str, asyncio.Task] = {}
-       # Stores AsyncTask dataclass instances representing the state and result of tasks.
-       # This includes completed and failed tasks for a period or until explicitly cleared.
+       # self.async_task_registry: Stores AsyncTask dataclass instances, providing a persistent record
+       # of each task's state, result, or error, keyed by task_id. This registry holds the history
+       # and final outcomes of tasks even after the asyncio.Task object is done.
        self.async_task_registry: Dict[str, AsyncTask] = {}
-       # Lock for thread-safe/async-safe modifications to the task registry
+       # self._task_registry_lock: An asyncio.Lock to ensure thread-safe (or rather, async-safe)
+       # modifications to async_task_registry and active_async_tasks.
        self._task_registry_lock = asyncio.Lock()
        # --- End Async Task Management Structures ---
 
        # --- Event Bus Structures ---
+       # self.event_subscribers: Maps event_type strings to a list of asynchronous callback handlers.
        self.event_subscribers: Dict[str, List[Callable[[SystemEvent], Coroutine[Any, Any, None]]]] = defaultdict(list)
+       # self.event_processing_queue: An asyncio.Queue where published SystemEvent objects are placed before dispatch.
        self.event_processing_queue: asyncio.Queue[SystemEvent] = asyncio.Queue()
+       # self._event_dispatcher_task: Holds the asyncio.Task object for the _event_dispatcher_loop. Started in __init__.
        self._event_dispatcher_task: Optional[asyncio.Task] = None
        # --- End Event Bus Structures ---
 
@@ -232,17 +237,26 @@ class TerminusOrchestrator:
    # --- Asynchronous Task Management Methods ---
    async def _async_task_wrapper(self, task_id: str, coro: Coroutine, task_name: Optional[str]):
         """
-        Internal wrapper for submitted coroutines. Updates task status in the registry.
+        Internal wrapper for submitted coroutines. Handles the lifecycle of an AsyncTask:
+        1. Sets status to RUNNING in async_task_registry.
+        2. Awaits the coroutine.
+        3. On completion, sets status to COMPLETED and stores the result.
+        4. On failure (exception), sets status to FAILED and stores the error.
+        5. On cancellation, sets status to CANCELLED.
+        6. Removes the corresponding asyncio.Task from active_async_tasks.
+        All updates to async_task_registry are performed under _task_registry_lock.
         """
         async with self._task_registry_lock:
-            # This should ideally only update, assuming submit_async_task already created PENDING entry
             task_info = self.async_task_registry.get(task_id)
-            if not task_info: # Should not happen if submit_async_task is used correctly
+            if not task_info:
+                # This case should ideally not be reached if submit_async_task correctly creates the entry.
+                # However, as a safeguard:
+                print(f"[AsyncTask-{task_id}] WARNING: Task info not found in registry at start of wrapper. Creating.")
                 task_info = AsyncTask(task_id=task_id, name=task_name or "Unnamed Task")
                 self.async_task_registry[task_id] = task_info
 
             task_info.status = AsyncTaskStatus.RUNNING
-            task_info.started_at = datetime.datetime.now()
+            task_info.started_at = datetime.datetime.utcnow() # Use UTC for consistency
             print(f"[AsyncTask-{task_id} ({task_info.name})] Status changed to RUNNING.")
 
         try:
@@ -250,23 +264,25 @@ class TerminusOrchestrator:
             async with self._task_registry_lock:
                 task_info.status = AsyncTaskStatus.COMPLETED
                 task_info.result = result
-                task_info.completed_at = datetime.datetime.now()
+                task_info.completed_at = datetime.datetime.utcnow() # Use UTC
                 print(f"[AsyncTask-{task_id} ({task_info.name})] Status changed to COMPLETED.")
-        except asyncio.CancelledError: # Handle task cancellation if implemented later
+        except asyncio.CancelledError:
             async with self._task_registry_lock:
                 task_info.status = AsyncTaskStatus.CANCELLED
                 task_info.error = "Task was cancelled."
-                task_info.completed_at = datetime.datetime.now()
+                task_info.completed_at = datetime.datetime.utcnow() # Use UTC
                 print(f"[AsyncTask-{task_id} ({task_info.name})] Status changed to CANCELLED.")
-            # Optionally re-raise if cancellation needs to propagate further
+            # Propagate CancelledError if the calling context needs to handle it (e.g. asyncio.gather)
+            # For now, we're consuming it here as the wrapper's role is to update status.
         except Exception as e:
             async with self._task_registry_lock:
                 task_info.status = AsyncTaskStatus.FAILED
-                task_info.error = f"{type(e).__name__}: {str(e)}" # Store type and message
-                task_info.completed_at = datetime.datetime.now()
+                task_info.error = f"{type(e).__name__}: {str(e)}"
+                task_info.completed_at = datetime.datetime.utcnow() # Use UTC
                 print(f"[AsyncTask-{task_id} ({task_info.name})] Status changed to FAILED. Error: {task_info.error}")
         finally:
-            # Remove from active_async_tasks dict as the asyncio.Task object is done
+            # Remove the asyncio.Task object from active_async_tasks as it's no longer running.
+            # The AsyncTask entry in async_task_registry remains for history/result retrieval.
             self.active_async_tasks.pop(task_id, None)
             print(f"[AsyncTask-{task_id} ({task_info.name})] Wrapper finished, removed from active tasks list.")
 
@@ -607,9 +623,16 @@ class TerminusOrchestrator:
            await asyncio.sleep(retry_delay_seconds)
 
    async def _handle_agent_service_call(self, service_call_step_def: Dict, current_step_outputs: Dict, full_plan_list: List[Dict]) -> Dict:
+        """
+        Handles a plan step of type 'agent_service_call'.
+        It resolves parameters, validates them against the service definition,
+        dispatches to a direct Python handler if available, or falls back to an LLM call
+        to the target agent. Manages synchronous and asynchronous results from these calls.
+        """
         step_id = service_call_step_def.get("step_id", "unknown_service_call_step")
         step_priority = service_call_step_def.get("priority", "normal").lower()
-        log_prefix = f"[Priority: {step_priority.upper()}] " if step_priority == "high" else ""
+        log_prefix = f"[{self.__class__.__name__}._handle_agent_service_call Step-{step_id}]" # More specific log prefix
+        if step_priority == "high": log_prefix += f" [Priority: HIGH]"
         target_agent_name = service_call_step_def.get("target_agent_name")
         service_name = service_call_step_def.get("service_name")
         service_params_template = service_call_step_def.get("service_params", {})
@@ -631,22 +654,30 @@ class TerminusOrchestrator:
             # However, for this refactoring, we will prioritize the new structured approach.
             # If a service is called, it SHOULD have a definition.
             # For now, let's make it an error if not defined, to enforce the new structure.
-            return {"step_id": step_id, "status": "error", "response": f"Service '{service_name}' on agent '{target_agent_name}' is not defined.", "data": None, "error_code": "SERVICE_NOT_DEFINED"}
+            error_message = f"Service '{service_name}' on agent '{target_agent_name}' is not defined."
+            print(f"{log_prefix} ERROR: {error_message}")
+            return {"step_id": step_id, "status": "error", "response": error_message, "data": None, "error_code": "SERVICE_NOT_DEFINED"}
 
         # --- Parameter Resolution, Validation, and Coercion ---
+        # This section iterates through parameters defined in the service_def,
+        # resolves their values from the plan step's service_params (handling templates),
+        # applies defaults, checks for required parameters, and performs basic type coercion.
         resolved_params = {}
         param_validation_errors = []
 
         for defined_param in service_def.parameters:
             param_name = defined_param.name
-            raw_value = service_params_template.get(param_name)
+            raw_value = service_params_template.get(param_name) # Get parameter value from plan step
 
-            # 1. Resolve from template if it's a string placeholder
+            # 1. Resolve from template string if applicable (e.g., "{{step_X_output.some_key}}")
             if isinstance(raw_value, str):
                 substituted_value = raw_value
+                # Regex to find placeholders like {{variable.path}} or {{variable}}
                 for dep_match in re.finditer(r"{{{{([\w.-]+)}}}}", raw_value):
                     var_path = dep_match.group(1)
-                    val_to_sub = current_step_outputs.get(var_path)
+                    val_to_sub = current_step_outputs.get(var_path) # Direct lookup first
+
+                    # Handle dot-notation for nested dictionary access from previous step outputs
                     if '.' in var_path and val_to_sub is None:
                         base_key, *attrs = var_path.split('.')
                         if base_key in current_step_outputs:
@@ -657,100 +688,113 @@ class TerminusOrchestrator:
                                     elif isinstance(temp_val, list) and part.isdigit(): temp_val = temp_val[int(part)]
                                     else: temp_val = None; break
                                 if temp_val is not None: val_to_sub = temp_val
-                            except: pass
-                    if val_to_sub is not None: substituted_value = substituted_value.replace(dep_match.group(0), str(val_to_sub))
-                    else: print(f"Warning: Could not resolve template var '{var_path}' for param '{param_name}' in service call {step_id}.")
+                            except Exception as e_attr: # pylint: disable=broad-except
+                                print(f"{log_prefix} Warning: Error accessing attribute '{part}' in '{var_path}': {e_attr}")
+                                val_to_sub = None # Ensure it's None if path is invalid
+
+                    if val_to_sub is not None:
+                        substituted_value = substituted_value.replace(dep_match.group(0), str(val_to_sub))
+                    else:
+                        print(f"{log_prefix} Warning: Could not resolve template variable '{var_path}' for parameter '{param_name}'. It might be optional or resolved later if the template itself is the value.")
                 actual_value = substituted_value
-            else: # Value is literal (not a string template) or already resolved
+            else: # Value is literal (e.g. int, bool, list, dict from JSON plan) or already resolved by prior step.
                 actual_value = raw_value
 
-            # 2. Handle missing parameters and defaults
-            if actual_value is None: # Parameter not provided in plan step
-                if defined_param.required and defined_param.default_value is None:
-                    param_validation_errors.append(f"Required parameter '{param_name}' is missing.")
-                    continue
-                elif defined_param.default_value is not None:
+            # 2. Handle missing parameters: use default if available, else error if required.
+            if actual_value is None: # Parameter not provided in plan step's service_params
+                if defined_param.default_value is not None:
                     actual_value = defined_param.default_value
-                    print(f"{log_prefix}INFO: Using default value for param '{param_name}': {actual_value}")
-                elif not defined_param.required: # Optional and no default, so skip
+                    print(f"{log_prefix} INFO: Using default value for parameter '{param_name}': {actual_value}")
+                elif defined_param.required:
+                    param_validation_errors.append(f"Required parameter '{param_name}' is missing and has no default.")
+                    continue # Skip to next parameter for validation
+                else: # Optional parameter without a value and no default; skip it.
                     continue
 
-            # 3. Type Coercion (Basic)
+            # 3. Type Coercion (Basic types for now)
             coerced_value = actual_value
+            target_type = defined_param.type.lower()
             try:
-                if defined_param.type == "integer" and actual_value is not None: coerced_value = int(actual_value)
-                elif defined_param.type == "float" and actual_value is not None: coerced_value = float(actual_value)
-                elif defined_param.type == "boolean" and actual_value is not None:
-                    if isinstance(actual_value, str): coerced_value = actual_value.lower() in ["true", "1", "yes"]
-                    else: coerced_value = bool(actual_value)
-                # For "string", "list", "dict", assume correct format or rely on handler/LLM
+                if actual_value is not None: # Only coerce if there's a value
+                    if target_type == "integer": coerced_value = int(actual_value)
+                    elif target_type == "float": coerced_value = float(actual_value)
+                    elif target_type == "boolean":
+                        if isinstance(actual_value, str):
+                            coerced_value = actual_value.lower() in ["true", "1", "yes"]
+                        else:
+                            coerced_value = bool(actual_value)
+                    elif target_type == "string": # Ensure it's a string if specified
+                        coerced_value = str(actual_value)
+                    # For "list", "dict", we assume the value from plan/template is already in the correct complex type.
+                    # More sophisticated validation for list/dict item types could be added later if needed.
             except ValueError as e_coerce:
-                param_validation_errors.append(f"Parameter '{param_name}' value '{actual_value}' could not be coerced to type '{defined_param.type}': {e_coerce}")
-                continue
+                param_validation_errors.append(f"Parameter '{param_name}' (value: '{actual_value}') could not be coerced to type '{defined_param.type}': {e_coerce}")
+                continue # Skip to next parameter for validation
 
             resolved_params[param_name] = coerced_value
 
         if param_validation_errors:
-            error_msg = f"Parameter validation failed for service '{service_name}': " + "; ".join(param_validation_errors)
+            error_msg = f"Parameter validation failed for service '{service_name}' on agent '{target_agent_name}': " + "; ".join(param_validation_errors)
+            print(f"{log_prefix} ERROR: {error_msg}")
             return {"step_id": step_id, "status": "error", "response": error_msg, "data": None, "error_code": "PARAMETER_VALIDATION_FAILED"}
 
-        # --- Execute Service ---
-        service_result_structured: Dict[str, Any]
+        # --- Execute Service (Direct Handler or LLM Fallback) ---
+        service_result_structured: Dict[str, Any] # This will hold the standardized service output
 
-        if service_key in self.service_handlers:
+        if service_key in self.service_handlers: # Check for a direct Python handler
             handler_method = self.service_handlers[service_key]
-            print(f"{log_prefix}Executing direct handler for service '{service_name}' on agent '{target_agent_name}' with params: {resolved_params}")
+            print(f"{log_prefix} Executing direct handler '{handler_method.__name__}' for service '{service_name}' with params: {resolved_params}")
             try:
-                # Pass both resolved_params and the service_def for context to the handler
-                # IMPORTANT: If handler_method itself might become a long-running task and needs to be non-blocking
-                # at this level, it would need to return a task_id dict, and _handle_agent_service_call
-                # would propagate it. For now, direct handlers are assumed to complete (even if they internally await).
-                # The change in Phase 2 for _service_codemaster_validate_syntax makes it internally await.
+                # Direct handlers are expected to be async and accept 'params' and 'service_definition'.
+                # They should return the standardized dictionary: {"status": ..., "data": ..., "message": ..., "error_code": ...}
                 service_result_structured = await handler_method(params=resolved_params, service_definition=service_def)
-                # If service_result_structured itself indicates pending_async (if a handler was refactored to do so),
-                # we should propagate that.
-                if service_result_structured.get("status") == "pending_async" and "task_id" in service_result_structured:
-                    print(f"{log_prefix}Direct handler for service '{service_name}' returned a pending task: {service_result_structured['task_id']}")
-                    # The structure from a handler returning pending_async should match what execute_agent returns
-                    return {
-                        "step_id": step_id,
-                        "agent_name": f"{target_agent_name} (Service: {service_name})",
-                        "status": "pending_async", # Propagate status
-                        "task_id": service_result_structured["task_id"],
-                        "response": service_result_structured.get("message", f"Service '{service_name}' on '{target_agent_name}' initiated as async task."),
-                        "data": None # No immediate data
-                    }
 
-            except Exception as e_handler:
-                err_msg = f"Direct handler for service '{service_name}' raised an exception: {e_handler}"
-                print(f"{log_prefix}ERROR: {err_msg}")
+                # If the direct handler itself returns a 'pending_async' status (e.g., if it internally started another managed task),
+                # propagate this status. This allows handlers to be fully non-blocking if they choose.
+                if service_result_structured.get("status") == "pending_async" and "task_id" in service_result_structured:
+                    print(f"{log_prefix} Direct handler for service '{service_name}' returned a pending task: {service_result_structured['task_id']}")
+                    return { # Ensure the propagated structure is consistent for plan execution
+                        "step_id": step_id,
+                        "agent_name": f"{target_agent_name} (Service: {service_name})", # Or from service_result_structured if provided
+                        "status": "pending_async",
+                        "task_id": service_result_structured["task_id"],
+                        "response": service_result_structured.get("message", f"Service '{service_name}' on '{target_agent_name}' (via direct handler) initiated as async task."),
+                        "data": None
+                    }
+            except Exception as e_handler: # Catch errors from the handler execution itself
+                err_msg = f"Direct handler '{handler_method.__name__}' for service '{service_name}' raised an exception: {type(e_handler).__name__}: {e_handler}"
+                print(f"{log_prefix} ERROR: {err_msg}")
                 service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "HANDLER_EXCEPTION"}
-        else:
-            print(f"{log_prefix}No direct handler for service '{service_name}' on agent '{target_agent_name}'. Using LLM fallback with definition.")
+        else: # No direct handler, proceed to LLM fallback
+            print(f"{log_prefix} No direct handler for service '{service_name}' on agent '{target_agent_name}'. Using LLM fallback.")
             target_agent = next((a for a in self.agents if a.name == target_agent_name and a.active), None)
             if not target_agent:
-                return {"step_id": step_id, "status": "error", "response": f"Target agent '{target_agent_name}' not found or inactive.", "data": None, "error_code": "AGENT_NOT_FOUND"}
+                err_msg = f"Target agent '{target_agent_name}' for LLM fallback of service '{service_name}' not found or inactive."
+                print(f"{log_prefix} ERROR: {err_msg}")
+                return {"step_id": step_id, "status": "error", "response": err_msg, "data": None, "error_code": "AGENT_NOT_FOUND"}
 
-            # Construct enhanced LLM prompt using service_def
+            # Construct the detailed prompt for the LLM agent based on the service definition
             param_details_for_prompt = "\n".join([f"  - {p.name} ({p.type}, {'required' if p.required else 'optional'}{', default: '+str(p.default_value) if p.default_value is not None and not p.required else ''}): {p.description}" for p in service_def.parameters])
             returns_details_for_prompt = f"  - type: {service_def.returns.type}\n  - description: {service_def.returns.description}"
 
             fallback_prompt = (
                 f"You are agent '{target_agent_name}'. You need to perform the service called '{service_def.name}'.\n"
                 f"Service Description: {service_def.description}\n\n"
-                f"Parameters Expected:\n{param_details_for_prompt}\n\n"
-                f"Expected Return Structure:\n{returns_details_for_prompt}\n\n"
-                f"Parameters Provided for this Call:\n{json.dumps(resolved_params, indent=2)}\n\n"
-                f"Based on the service description, process the provided parameters and generate a JSON response that strictly conforms to the 'Expected Return Structure'. The main data should be under a 'data' key in your JSON response, and you should also include a 'status' ('success' or 'error') and a 'message' key."
-                f"Example of expected JSON output format from you (the LLM agent):\n"
-                f"{{\n  \"status\": \"success\",\n  \"data\": <value_matching_return_type_of_{service_def.returns.type}>,\n  \"message\": \"Service completed successfully.\"\n}}"
+                f"Parameters Expected by the service:\n{param_details_for_prompt}\n\n"
+                f"Expected Return Structure from you (the LLM Agent):\n"
+                f"  A JSON object containing:\n"
+                f"  - 'status': (string) 'success' or 'error'.\n"
+                f"  - 'data': (matching '{service_def.returns.type}') The actual data payload as described: {service_def.returns.description}.\n"
+                f"  - 'message': (string, optional) A human-readable message about the operation.\n\n"
+                f"Parameters Provided for this specific call:\n{json.dumps(resolved_params, indent=2)}\n\n"
+                f"Process the provided parameters according to the service description and generate a JSON response that strictly conforms to the 'Expected Return Structure' detailed above."
             )
 
+            # Call execute_agent, which might return a 'pending_async' status if the target is an LLM agent
             llm_call_result_or_task = await self.execute_agent(target_agent, fallback_prompt)
 
             if llm_call_result_or_task.get("status") == "pending_async":
-                # LLM fallback was submitted as an async task by execute_agent
-                print(f"{log_prefix}LLM fallback for service '{service_name}' initiated as task: {llm_call_result_or_task['task_id']}")
+                print(f"{log_prefix} LLM fallback for service '{service_name}' initiated as task: {llm_call_result_or_task['task_id']}")
                 return { # Propagate the pending_async status
                     "step_id": step_id,
                     "agent_name": f"{target_agent_name} (Service: {service_name}, LLM Fallback)",
@@ -759,25 +803,27 @@ class TerminusOrchestrator:
                     "response": llm_call_result_or_task.get("message", f"LLM fallback for service '{service_name}' initiated."),
                     "data": None
                 }
-            elif llm_call_result_or_task.get("status") == "success": # Should ideally not happen if LLM agent always goes to pending_async
-                # This path implies execute_agent returned a direct success for an LLM agent, which is not the new norm.
-                # However, if it did, we'd try to parse its "response" as the structured JSON.
+            # If execute_agent returned a synchronous result (e.g., an immediate error before task submission)
+            elif llm_call_result_or_task.get("status") == "success":
+                # This case is less expected now for LLM agents, as execute_agent should return pending_async.
+                # However, if it occurs, try to parse the response as the structured JSON.
+                print(f"{log_prefix} WARNING: LLM fallback for service '{service_name}' returned synchronous success. Expecting pending_async for LLM agents.")
                 try:
                     parsed_llm_response = json.loads(llm_call_result_or_task.get("response","{}"))
-                    if not isinstance(parsed_llm_response, dict) or "status" not in parsed_llm_response or "data" not in parsed_llm_response:
-                        raise ValueError("LLM direct response missing status/data keys.")
+                    if not (isinstance(parsed_llm_response, dict) and "status" in parsed_llm_response and "data" in parsed_llm_response):
+                        raise ValueError("LLM fallback (sync success) response does not conform to expected structured JSON with status and data keys.")
                     service_result_structured = parsed_llm_response
-                    if "message" not in service_result_structured:
-                        service_result_structured["message"] = f"LLM for service '{service_name}' (direct) completed with status: {service_result_structured['status']}"
-                except Exception as e_parse_direct_llm:
-                    err_msg = f"Error parsing direct LLM response for service '{service_name}': {e_parse_direct_llm}. Raw: {llm_call_result_or_task.get('response','')[:200]}..."
-                    service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "LLM_DIRECT_RESPONSE_PARSE_ERROR"}
-            else: # LLM call itself failed before becoming an async task (e.g., agent model misconfiguration in execute_agent)
-                err_msg = f"LLM call for service '{service_name}' failed before async submission: {llm_call_result_or_task.get('response')}"
-                print(f"{log_prefix}ERROR: {err_msg}")
-                service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "LLM_PRE_ASYNC_CALL_FAILED"}
+                    service_result_structured.setdefault("message", f"LLM for service '{service_name}' (sync fallback) completed with status: {service_result_structured['status']}")
+                except Exception as e_parse_llm_sync:
+                    err_msg = f"Error parsing synchronous LLM fallback response for service '{service_name}': {e_parse_llm_sync}. Raw: {llm_call_result_or_task.get('response','')[:200]}..."
+                    print(f"{log_prefix} ERROR: {err_msg}")
+                    service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "LLM_FALLBACK_SYNC_RESPONSE_PARSE_ERROR"}
+            else: # Synchronous error from execute_agent itself
+                err_msg = f"LLM fallback call (via execute_agent) for service '{service_name}' failed before async submission: {llm_call_result_or_task.get('response')}"
+                print(f"{log_prefix} ERROR: {err_msg}")
+                service_result_structured = {"status": "error", "data": None, "message": err_msg, "error_code": "LLM_FALLBACK_PRE_ASYNC_CALL_FAILED"}
 
-        # --- Process final result (if not pending_async) ---
+        # --- Process final result (if the step was not pending_async) ---
         final_status = service_result_structured.get("status", "error")
         final_data = service_result_structured.get("data")
         final_message = service_result_structured.get("message", "Service call completed.")
@@ -1069,9 +1115,21 @@ class TerminusOrchestrator:
        return round(reward, 4)
 
    async def execute_master_plan(self, user_prompt: str, request_priority: Optional[str] = "normal") -> List[Dict]:
+        """
+        Orchestrates the execution of a multi-step plan generated by the MasterPlanner agent
+        in response to a user prompt. Handles synchronous and asynchronous step execution,
+        dependencies, conditional logic, loops (basic), and plan revisions.
+
+        Args:
+            user_prompt: The user's request.
+            request_priority: The priority of the request (e.g., "normal", "high").
+
+        Returns:
+            A list of dictionaries, where each dictionary represents the final result of a plan step.
+        """
        plan_handler_id = f"[MasterPlanner user_prompt:'{user_prompt[:50]}...' Priority:'{request_priority}']"
        rl_interaction_id = str(uuid.uuid4())
-       timestamp_interaction_start = datetime.datetime.now().isoformat()
+       timestamp_interaction_start = datetime.datetime.utcnow().isoformat() # Use UTC
 
        print(f"{plan_handler_id} START: Received request. RL Interaction ID: {rl_interaction_id}")
        self.conversation_history.append({"role": "user", "content": user_prompt})
@@ -1189,7 +1247,38 @@ class TerminusOrchestrator:
            active_loops = {} # For managing loop contexts (as before)
            loop_context_stack = [] # For managing nested loops (as before)
 
-           # Loop as long as there are steps not yet successfully completed, or async tasks pending for this plan
+           # --- Main Plan Execution Loop with Async Task Management ---
+           # This loop continues as long as there are steps in the plan that haven't been successfully executed,
+           # OR if there are asynchronous tasks still pending completion for the current plan attempt.
+           #
+           # The loop has three main parts in each iteration:
+           # 1. Dispatch Ready Steps: Iterate through the plan_list. If a step's dependencies are met
+           #    (i.e., all preceding steps it depends on are in `executed_step_ids`) and it's not already
+           #    pending or executed, then dispatch it.
+           #    - If a step is dispatched and completes synchronously (success or failure), its result is recorded,
+           #      and it's added to `executed_step_ids`.
+           #    - If a step is dispatched and returns a `pending_async` status (with a `task_id`), it's added
+           #      to the `pending_async_steps` dictionary (mapping step_id to task_id).
+           # 2. Poll Pending Async Tasks: Iterate through `pending_async_steps`. For each, check its status
+           #    using `get_async_task_info()`.
+           #    - If COMPLETED: Process its result, update `step_outputs`, add to `current_attempt_results`
+           #      and `executed_step_ids`. Remove from `pending_async_steps`.
+           #    - If FAILED: Record failure, add to `executed_step_ids`, remove from `pending_async_steps`,
+           #      and mark the overall plan attempt as failed.
+           # 3. Sleep if Idle: If no new steps were dispatched in part 1, and no async tasks were resolved in part 2,
+           #    but there are still tasks in `pending_async_steps`, then sleep briefly to avoid busy-waiting
+           #    before the next polling cycle.
+           #
+           # The loop terminates for the current attempt if:
+           #    a) All steps in `plan_list` are in `executed_step_ids` AND `pending_async_steps` is empty (plan success).
+           #    b) `plan_succeeded_this_attempt` becomes `False` (due to a step failure, sync or async).
+           #    c) A deadlock/stall is detected (no progress, no pending tasks, but plan not complete).
+           #
+           # executed_step_ids tracks steps whose *final result* (sync or async) is processed.
+           executed_step_ids = set()
+           active_loops = {} # For managing loop contexts (as before)
+           loop_context_stack = [] # For managing nested loops (as before)
+
            while len(executed_step_ids) < len(plan_list) or pending_async_steps:
                dispatched_this_cycle = False # Track if any new step was dispatched or async task completed
 
@@ -1202,159 +1291,175 @@ class TerminusOrchestrator:
                    if step_id_to_evaluate in executed_step_ids or step_id_to_evaluate in pending_async_steps:
                        current_step_idx_for_dispatch +=1; continue # Already done or pending
 
-                   # Check dependencies
+                   # Check dependencies: all dependent step_ids must be in executed_step_ids
                    can_execute = True
                    for dep_id in step_to_evaluate.get("dependencies",[]):
-                       if dep_id not in executed_step_ids: # Dependency not met
+                       if dep_id not in executed_step_ids:
+                           # print(f"{plan_handler_id} Deferring step {step_id_to_evaluate}: Unmet dependency {dep_id}")
                            can_execute = False; break
 
                    if not can_execute:
                        current_step_idx_for_dispatch +=1; continue
 
-                   # --- Dispatching the step (similar logic to before, but adapted) ---
-                   dispatched_this_cycle = True
-                   processed_step_ids_this_attempt.add(step_id_to_evaluate) # Mark as processed (submitted or completed)
+                   # --- Dispatching the step ---
+                   dispatched_this_cycle = True # A step is being dispatched
+                   processed_step_ids_this_attempt.add(step_id_to_evaluate)
 
                    step_priority = step_to_evaluate.get("priority", "normal").lower()
-                   dispatch_log_prefix = f"[{plan_handler_id}]"
+                   dispatch_log_prefix = f"[{plan_handler_id}]" # Re-init for each step for clarity
                    if step_priority == "high": dispatch_log_prefix += f" [Priority: HIGH]"
+
                    step_type_for_log = step_to_evaluate.get("step_type", "agent_execution")
                    log_agent_name = step_to_evaluate.get('agent_name', step_to_evaluate.get('target_agent_name', 'N/A'))
                    log_desc = step_to_evaluate.get('description', step_to_evaluate.get('service_name', 'N/A'))[:50]
                    print(f"{dispatch_log_prefix} Dispatching Step {step_id_to_evaluate}: Type='{step_type_for_log}', Agent/Service='{log_agent_name}', Desc='{log_desc}...'")
 
-                   step_result_or_task: Dict
+                   step_result_or_task: Dict # To hold result from sync step or task info from async submission
                    step_type = step_to_evaluate.get("step_type", "agent_execution")
 
+                   # --- Step Type Handling (Conditional, Loop, Service Call, Regular Agent) ---
                    if step_type == "conditional":
-                       # Conditional logic is synchronous evaluation based on prior step_outputs
                        next_step_id_from_cond, eval_res_cond = await self._handle_conditional_step(step_to_evaluate, plan_list, step_outputs, executed_step_ids, plan_handler_id)
                        step_result_or_task = eval_res_cond if eval_res_cond else {"step_id": step_id_to_evaluate, "status":"error", "response":"Conditional eval result missing"}
-                       # Conditional step itself is now "executed"
+                       # Conditional step itself is now "executed" (its evaluation is complete)
                        executed_step_ids.add(step_id_to_evaluate)
-                       current_attempt_results.append(step_result_or_task)
+                       current_attempt_results.append(step_result_or_task) # Log its evaluation result
                        if step_result_or_task.get("status") != "success": plan_succeeded_this_attempt = False; break
-                       # Jump logic needs careful handling if we are not using current_step_idx in the outer loop directly for dispatch
-                       # For now, conditional jumps will be handled by the next dispatch cycle finding the correct next step.
-                       # This part might need refinement if strict sequential indexing after jump is critical.
-                       # The current dispatch logic (iterating current_step_idx_for_dispatch) should naturally find the next valid step.
+                       # Note: Jump logic for conditionals is implicitly handled by the dispatcher finding the next valid step based on dependencies and executed_ids.
+
                    elif step_type == "loop" and step_to_evaluate.get("loop_type") == "while":
-                       # Loop header evaluation is synchronous
-                       # ... (loop handling logic as before, ensuring it updates executed_step_ids for the loop header) ...
-                       # This needs careful integration with the new dispatch loop.
-                       # For now, let's assume loop logic is complex and we'll simplify its handling here.
-                       # A full refactor of loop logic with async steps inside is a larger task.
-                       # Placeholder: Treat loop header as a synchronous step for now.
-                       print(f"{plan_handler_id} DEBUG: Loop step {step_id_to_evaluate} encountered. (Async loop body not fully supported in this refactor iteration).")
+                       # TODO: Loop logic needs significant review for full async compatibility within loop bodies.
+                       # Current _handle_loop_step might not integrate perfectly if loop body steps become async.
+                       # For now, treating loop header evaluation as synchronous.
+                       print(f"{plan_handler_id} DEBUG: Loop step {step_id_to_evaluate} encountered. Advanced async loop body handling is TBD.")
+                       # Simplified: Assume loop header itself is a synchronous operation for now.
+                       # A more robust solution would involve making _handle_loop_step async-aware or
+                       # integrating loop flow control directly into this main execution dispatcher.
+                       # This is a placeholder to keep the structure.
                        step_result_or_task = {"status":"success", "response": f"Loop header {step_id_to_evaluate} processed (simulated)."}
-                       executed_step_ids.add(step_id_to_evaluate)
+                       executed_step_ids.add(step_id_to_evaluate) # Mark loop header as executed
                        current_attempt_results.append(step_result_or_task)
 
                    elif step_type == "agent_service_call":
                        step_result_or_task = await self._handle_agent_service_call(step_to_evaluate, step_outputs, plan_list)
-                   elif step_to_evaluate.get("agent_name") == "parallel_group": # Not fully implemented
-                       print(f"DEBUG: Parallel group {step_id_to_evaluate} encountered (simulated sync).")
+
+                   elif step_to_evaluate.get("agent_name") == "parallel_group": # Not fully implemented yet
+                       # TODO: Parallel group execution would involve submitting multiple sub-steps as async tasks
+                       # and then waiting for all of them, potentially using asyncio.gather.
+                       print(f"{dispatch_log_prefix} DEBUG: Parallel group {step_id_to_evaluate} encountered (simulated as synchronous success).")
                        step_result_or_task = {"status": "success", "response": f"Parallel group {step_id_to_evaluate} processed (simulated)."}
-                   else: # Regular agent execution step
+
+                   else: # Regular agent execution step (e.g., direct agent call, not a service)
                        step_result_or_task = await self._execute_single_plan_step(step_to_evaluate, plan_list, step_outputs)
 
-                   # --- Process result of dispatched step ---
+                   # --- Process result of the dispatched step ---
                    if step_result_or_task.get("status") == "pending_async":
+                       # The step initiated an asynchronous task.
                        task_id = step_result_or_task["task_id"]
-                       pending_async_steps[step_id_to_evaluate] = task_id
-                       print(f"{plan_handler_id} Step {step_id_to_evaluate} is PENDING_ASYNC with task_id {task_id}.")
+                       pending_async_steps[step_id_to_evaluate] = task_id # Map step_id to task_id
+                       print(f"{dispatch_log_prefix} Step {step_id_to_evaluate} initiated as PENDING_ASYNC task_id: {task_id}.")
+
                    elif step_result_or_task.get("status") == "success":
+                       # The step completed synchronously and successfully.
                        current_attempt_results.append(step_result_or_task)
                        executed_step_ids.add(step_id_to_evaluate) # Mark as fully completed
-                       print(f"{plan_handler_id} Step {step_id_to_evaluate} completed synchronously with SUCCESS.")
-                   else: # Synchronous failure
+                       print(f"{dispatch_log_prefix} Step {step_id_to_evaluate} completed synchronously with SUCCESS.")
+
+                   else: # The step completed synchronously but failed.
                        current_attempt_results.append(step_result_or_task)
-                       executed_step_ids.add(step_id_to_evaluate) # Mark as completed (failed)
-                       plan_succeeded_this_attempt = False
-                       print(f"{plan_handler_id} Step {step_id_to_evaluate} completed synchronously with FAILURE: {step_result_or_task.get('response')}")
-                       break # Stop processing more steps this attempt if one fails synchronously
+                       executed_step_ids.add(step_id_to_evaluate) # Mark as completed (albeit failed)
+                       plan_succeeded_this_attempt = False # Mark entire plan attempt as failed
+                       print(f"{dispatch_log_prefix} Step {step_id_to_evaluate} completed synchronously with FAILURE: {step_result_or_task.get('response')}")
+                       break # Exit the dispatch loop for this attempt, as a step has failed.
 
                    current_step_idx_for_dispatch +=1
-               # End of dispatch loop for new steps
-               if not plan_succeeded_this_attempt: break # Exit main while loop for this attempt
+               # End of dispatch loop (part 1 of main while loop)
+
+               if not plan_succeeded_this_attempt: break # Exit main execution while loop for this attempt if a sync step failed.
 
                # 2. Check status of pending asynchronous tasks
                if pending_async_steps:
-                   completed_tasks_this_cycle: List[str] = []
-                   for step_id_pending, task_id_pending in pending_async_steps.items():
+                   completed_tasks_this_cycle: List[str] = [] # step_ids of tasks that finished this cycle
+                   for step_id_pending, task_id_pending in list(pending_async_steps.items()): # list() for safe removal
                        task_info = await self.get_async_task_info(task_id_pending)
-                       if task_info:
-                           if task_info.status == AsyncTaskStatus.COMPLETED:
-                               dispatched_this_cycle = True # Activity occurred
-                               print(f"{plan_handler_id} AsyncTask {task_id_pending} for step {step_id_pending} COMPLETED.")
-                               # Result of an async LLM call via execute_agent is the dict from _ollama_generate
-                               # Result of an async Service Call LLM fallback is the dict from the LLM (status, data, message)
-                               # Result of an async direct Service Handler (if it returned task_id) would be its final structured dict.
-                               async_step_result = task_info.result
-                               if not isinstance(async_step_result, dict): # Should be a dict from execute_agent or service call
-                                   async_step_result = {"status": "error", "response": f"Async task result for step {step_id_pending} was not a dict: {async_step_result}", "data": None}
 
-                               # Store output if successful
-                               output_var_name_for_async = next((s.get("output_variable_name") for s in plan_list if s.get("step_id") == step_id_pending), None)
+                       if task_info: # Ensure task info was found
+                           if task_info.status == AsyncTaskStatus.COMPLETED:
+                               dispatched_this_cycle = True # Activity occurred (an async task completed)
+                               print(f"{plan_handler_id} AsyncTask {task_id_pending} for step {step_id_pending} has COMPLETED.")
+
+                               async_step_result = task_info.result # This is the dict from execute_agent or service call
+                               if not isinstance(async_step_result, dict):
+                                   # This indicates an issue with what the async task's coroutine returned to the wrapper.
+                                   print(f"{plan_handler_id} ERROR: Async task {task_id_pending} (step {step_id_pending}) result is not a dict: {async_step_result}")
+                                   async_step_result = {"status": "error", "response": f"Async task result format error for step {step_id_pending}", "data": None}
+
+                               # Store output if successful and output_variable_name is defined
+                               original_step_def_for_async = next((s_def for s_def in plan_list if s_def.get("step_id") == step_id_pending), None)
+                               output_var_name_for_async = original_step_def_for_async.get("output_variable_name") if original_step_def_for_async else None
+
                                if async_step_result.get("status") == "success" and output_var_name_for_async:
-                                   # If the result is from a service call, its 'data' field holds the actual output
-                                   # If from _execute_single_plan_step -> _ollama_generate, its 'response' field is the primary output
                                    data_to_store = async_step_result.get("data", async_step_result.get("response"))
                                    step_outputs[output_var_name_for_async] = data_to_store
-                                   # Handle other special keys like image_path if needed from async_step_result
-                                   for mk in ["image_path","frame_path","gif_path","speech_path","modified_file"]:
-                                       if mk in async_step_result: step_outputs[f"{output_var_name_for_async}_{mk}"]=async_step_result[mk]
+                                   # Handle other special keys if present in the async result (e.g., image_path)
+                                   for mk_async in ["image_path","frame_path","gif_path","speech_path","modified_file"]:
+                                       if mk_async in async_step_result: step_outputs[f"{output_var_name_for_async}_{mk_async}"]=async_step_result[mk_async]
 
-                               original_step_def_for_async = next((s_def for s_def in plan_list if s_def.get("step_id") == step_id_pending), None)
+                               # Log the result of the completed async step
                                agent_name_for_async_log = "UnknownAgent"
                                if original_step_def_for_async:
                                    agent_name_for_async_log = original_step_def_for_async.get('agent_name',
                                                                original_step_def_for_async.get('target_agent_name', 'AsyncStep'))
-
                                current_attempt_results.append({
                                    "step_id": step_id_pending,
                                    "agent_name": agent_name_for_async_log,
                                    "status": async_step_result.get("status"),
-                                   "response": async_step_result.get("message", async_step_result.get("response")), # Prefer message for services
-                                   "data": async_step_result.get("data") # Data from service call
+                                   "response": async_step_result.get("message", async_step_result.get("response")),
+                                   "data": async_step_result.get("data")
                                 })
-                                executed_step_ids.add(step_id_pending)
+                                executed_step_ids.add(step_id_pending) # Mark step as fully executed
                                 completed_tasks_this_cycle.append(step_id_pending)
                                 if async_step_result.get("status") != "success":
-                                    plan_succeeded_this_attempt = False
+                                    plan_succeeded_this_attempt = False # Mark plan attempt as failed
 
                            elif task_info.status == AsyncTaskStatus.FAILED:
                                dispatched_this_cycle = True # Activity occurred
-                               print(f"{plan_handler_id} AsyncTask {task_id_pending} for step {step_id_pending} FAILED: {task_info.error}")
-                               current_attempt_results.append({"step_id": step_id_pending, "status": "error", "response": task_info.error})
-                               executed_step_ids.add(step_id_pending)
+                               print(f"{plan_handler_id} AsyncTask {task_id_pending} for step {step_id_pending} has FAILED: {task_info.error}")
+                               current_attempt_results.append({"step_id": step_id_pending, "status": "error", "response": task_info.error, "agent_name": "AsyncTaskManager"})
+                               executed_step_ids.add(step_id_pending) # Mark as executed (failed)
                                completed_tasks_this_cycle.append(step_id_pending)
-                               plan_succeeded_this_attempt = False
-                           # else PENDING or RUNNING, do nothing this cycle for this task
-                       else: # Should not happen if task IDs are managed correctly
-                           print(f"{plan_handler_id} ERROR: No task info found for pending task_id {task_id_pending} (step {step_id_pending}). Marking as error.")
-                           current_attempt_results.append({"step_id": step_id_pending, "status": "error", "response": "Async task info lost."})
+                               plan_succeeded_this_attempt = False # Mark plan attempt as failed
+
+                           # If PENDING or RUNNING, do nothing this cycle for this task, wait for next poll.
+
+                       else: # Task info not found - should be rare if IDs are managed correctly
+                           print(f"{plan_handler_id} ERROR: No task info found for pending task_id {task_id_pending} (step {step_id_pending}). Marking step as error.")
+                           current_attempt_results.append({"step_id": step_id_pending, "status": "error", "response": "Async task info lost.", "agent_name": "AsyncTaskManager"})
                            executed_step_ids.add(step_id_pending)
                            completed_tasks_this_cycle.append(step_id_pending)
                            plan_succeeded_this_attempt = False
 
+                   # Remove tasks that completed or failed this cycle from pending_async_steps
                    for step_id_done in completed_tasks_this_cycle:
                        pending_async_steps.pop(step_id_done, None)
 
-                   if not plan_succeeded_this_attempt: break # Exit main while loop for this attempt
+                   if not plan_succeeded_this_attempt: break # Exit main execution while loop for this attempt if an async task failed.
 
-               # 3. If no steps were dispatched and no async tasks completed/failed this cycle, but still pending tasks, sleep.
+               # 3. Sleep if no activity but tasks are still pending, or break if deadlocked
                if not dispatched_this_cycle and pending_async_steps:
-                   print(f"{plan_handler_id} No new steps dispatched or tasks completed this cycle. {len(pending_async_steps)} tasks still pending. Sleeping...")
-                   await asyncio.sleep(0.2) # Polling interval for pending tasks
+                   # No new steps were ready to dispatch, and no pending tasks finished this cycle.
+                   # Sleep briefly before polling pending tasks again.
+                   print(f"{plan_handler_id} No new dispatches or task completions this cycle. {len(pending_async_steps)} tasks still pending. Sleeping...")
+                   await asyncio.sleep(0.2)
                elif not dispatched_this_cycle and not pending_async_steps and len(executed_step_ids) < len(plan_list):
-                   # This case indicates a possible deadlock or issue with dependency logic if plan is not complete.
-                   print(f"{plan_handler_id} WARNING: No progress made, no pending tasks, but plan not complete. Check for unbreakable dependency loops or logic errors.")
-                   plan_succeeded_this_attempt = False # Consider this a failure of the plan execution logic
-                   break
+                   # No new dispatches, no pending tasks, but plan is not fully executed.
+                   # This indicates a potential deadlock (e.g., circular dependencies or unmet dependencies).
+                   print(f"{plan_handler_id} WARNING: No progress made (no new dispatches, no pending tasks), but plan not complete ({len(executed_step_ids)}/{len(plan_list)} steps executed). Check for dependency errors or logic issues in plan.")
+                   plan_succeeded_this_attempt = False # Consider this a failure of the plan execution.
+                   break # Exit main execution loop for this attempt.
 
            # --- End of Main Plan Execution Loop for this attempt ---
-           final_exec_results = current_attempt_results
+           final_exec_results = current_attempt_results # These are the results of all processed steps for this attempt
 
            if not plan_succeeded_this_attempt and current_attempt < max_rev_attempts:
                # Capture failure context for revision. If failure was due to an async step, find its details in current_attempt_results.
