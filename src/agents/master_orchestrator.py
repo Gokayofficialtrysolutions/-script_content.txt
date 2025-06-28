@@ -39,11 +39,12 @@ import io # For BytesIO
 
 from duckduckgo_search import DDGS
 
-from collections import defaultdict # Ensure defaultdict is imported if not already
+from collections import defaultdict
 from ..core import prompt_constructors
 from ..core.rl_logger import RLExperienceLogger
 from ..core.async_tools import AsyncTask, AsyncTaskStatus
-from ..core.event_system import SystemEvent # New Import for Event Bus
+from ..core.event_system import SystemEvent
+from ..core.conversation_history import ConversationTurn, ConversationContextManager # New Imports
 
 
 # --- New/Modified Dataclasses for Service Definitions ---
@@ -120,12 +121,30 @@ class TerminusOrchestrator:
        self.feedback_log_file_path = self.logs_dir / "feedback_log.jsonl"
        self.feedback_analyzer_script_path = self.tools_dir / "feedback_analyzer.py"
 
+       # Initialize Conversation Context Manager with configurable parameters
+       # TODO: Load these from a dedicated orchestrator configuration file in the future.
+       self.conv_ctx_mgr_config = {
+           "summarization_threshold_turns": 20,
+           "summarization_chunk_size": 10,
+           "min_turns_to_keep_raw_at_end": 5,
+           # For get_contextual_history defaults:
+           "default_max_tokens": 3000,
+           "default_desired_recent_turns": 7
+       }
+       self.conversation_context_manager = ConversationContextManager(
+           summarization_threshold_turns=self.conv_ctx_mgr_config["summarization_threshold_turns"],
+           summarization_chunk_size=self.conv_ctx_mgr_config["summarization_chunk_size"],
+           min_turns_to_keep_raw_at_end=self.conv_ctx_mgr_config["min_turns_to_keep_raw_at_end"]
+       )
+       self.conversation_history: List[ConversationTurn] = [] # Now stores ConversationTurn objects
+
        for dir_path in [self.data_dir, self.logs_dir, self.tools_dir,
                         self.generated_images_dir, self.video_processing_dir,
                         self.audio_processing_dir, Path(self.chroma_db_path).parent]:
            dir_path.mkdir(parents=True, exist_ok=True)
 
        try:
+           # Agent configuration loading
            with open(self.agents_config_path, 'r', encoding='utf-8') as f:
                agents_data_raw = json.load(f)
 
@@ -233,6 +252,101 @@ class TerminusOrchestrator:
        self.rl_experience_log_path = self.logs_dir / "rl_experience_log.jsonl"
        self.rl_logger = RLExperienceLogger(self.rl_experience_log_path)
        print(f"RL Experience Logger initialized. Logging to: {self.rl_experience_log_path}")
+
+   async def _orchestrate_conversation_summarization(self):
+        """
+        Checks if conversation history needs summarization and orchestrates it.
+        This method calls an LLM agent to perform the summarization if needed.
+        It should be called periodically or before fetching context for long conversations.
+        """
+        if not hasattr(self, 'conversation_context_manager'): # Safety check
+            print("[Orchestrator] ERROR: ConversationContextManager not initialized. Skipping summarization.")
+            return
+
+        chunk_data = self.conversation_context_manager.identify_chunk_for_summarization()
+        if not chunk_data:
+            # print("[Orchestrator] No conversation chunk identified for summarization at this time.")
+            return
+
+        original_indices, turns_to_summarize = chunk_data
+        if not turns_to_summarize:
+            return
+
+        print(f"[Orchestrator] Attempting to summarize {len(turns_to_summarize)} turns (indices {original_indices}).")
+
+        # Prepare text for summarization
+        text_to_summarize = "\n".join([f"{t.role}: {t.content}" for t in turns_to_summarize])
+
+        summarizer_agent = next((a for a in self.agents if a.name == "DocSummarizer" and a.active), None)
+        if not summarizer_agent:
+            summarizer_agent = next((a for a in self.agents if a.name == "GeneralPurposeAgent" and a.active), None) # Fallback
+
+        if not summarizer_agent:
+            print("[Orchestrator] ERROR: No summarizer agent (DocSummarizer or GeneralPurposeAgent) available. Cannot summarize conversation.")
+            return
+
+        summary_prompt = (
+            f"Summarize the following conversation excerpt concisely, capturing key information, decisions, and outcomes. "
+            f"The summary will replace these turns in a longer conversation history.\n\n"
+            f"EXCERPT:\n{text_to_summarize[:10000]}\n\nSUMMARY:" # Limit input to LLM
+        )
+
+        # Call execute_agent for summarization. This will return a task_id.
+        summary_task_submission = await self.execute_agent(summarizer_agent, summary_prompt)
+
+        if summary_task_submission.get("status") == "pending_async":
+            summary_task_id = summary_task_submission["task_id"]
+            print(f"[Orchestrator] Conversation summarization task {summary_task_id} submitted. Awaiting result...")
+
+            summary_text = None
+            # Await the result of the summarization task
+            while True:
+                await asyncio.sleep(0.5) # Poll interval for summary task
+                task_info = await self.get_async_task_info(summary_task_id)
+                if not task_info:
+                    print(f"[Orchestrator] ERROR: Summary task {summary_task_id} info not found.")
+                    return # Cannot proceed with summarization
+
+                if task_info.status == AsyncTaskStatus.COMPLETED:
+                    if task_info.result and task_info.result.get("status") == "success":
+                        summary_text = task_info.result.get("response")
+                        print(f"[Orchestrator] Summary task {summary_task_id} completed. Summary: '{summary_text[:100]}...'")
+                    else:
+                        print(f"[Orchestrator] ERROR: Summary task {summary_task_id} completed but failed or no response: {task_info.result}")
+                    break
+                elif task_info.status == AsyncTaskStatus.FAILED:
+                    print(f"[Orchestrator] ERROR: Summary task {summary_task_id} failed: {task_info.error}")
+                    break
+                elif task_info.status == AsyncTaskStatus.CANCELLED:
+                    print(f"[Orchestrator] WARN: Summary task {summary_task_id} was cancelled.")
+                    break
+
+            if summary_text and summary_text.strip():
+                # Determine start and end times for the summary description
+                start_time_str = turns_to_summarize[0].timestamp.strftime('%Y-%m-%d %H:%M')
+                end_time_str = turns_to_summarize[-1].timestamp.strftime('%Y-%m-%d %H:%M')
+
+                summary_turn_content = f"Summary of conversation from {start_time_str} to {end_time_str} UTC: {summary_text}"
+                summary_turn = ConversationTurn(
+                    role="system",
+                    content=summary_turn_content,
+                    metadata={
+                        "is_summary": True,
+                        "summarized_turn_count": len(turns_to_summarize),
+                        # Storing original indices might be complex if _managed_history shifts often.
+                        # Storing first/last original turn timestamps is safer.
+                        "summarized_period_start_ts": turns_to_summarize[0].timestamp.isoformat(),
+                        "summarized_period_end_ts": turns_to_summarize[-1].timestamp.isoformat(),
+                    }
+                )
+                self.conversation_context_manager.replace_turns_with_summary(original_indices, summary_turn)
+                print(f"[Orchestrator] Conversation history updated with summary turn.")
+            else:
+                print(f"[Orchestrator] Failed to obtain a valid summary. No changes made to conversation history.")
+        else:
+            # This case (execute_agent not returning pending_async for an LLM agent) should be rare now.
+            print(f"[Orchestrator] ERROR: Summarization call to agent {summarizer_agent.name} did not return pending_async status: {summary_task_submission}")
+
 
    # --- Asynchronous Task Management Methods ---
    async def _async_task_wrapper(self, task_id: str, coro: Coroutine, task_name: Optional[str]):
@@ -1132,9 +1246,26 @@ class TerminusOrchestrator:
        timestamp_interaction_start = datetime.datetime.utcnow().isoformat() # Use UTC
 
        print(f"{plan_handler_id} START: Received request. RL Interaction ID: {rl_interaction_id}")
-       self.conversation_history.append({"role": "user", "content": user_prompt})
+
+       # Add current user prompt to history as a ConversationTurn object
+       # Extract keywords for the new user turn.
+       user_prompt_keywords = self.conversation_context_manager.extract_keywords_from_text(user_prompt)
+       user_turn = ConversationTurn(role="user", content=user_prompt, keywords=user_prompt_keywords)
+       self.conversation_history.append(user_turn)
+       print(f"{plan_handler_id} INFO: Extracted keywords from user prompt: {user_prompt_keywords}")
+
+       # Prune overall history if it exceeds max_history_items (simple FIFO for overall limit)
        if len(self.conversation_history) > self.max_history_items:
            self.conversation_history = self.conversation_history[-self.max_history_items:]
+
+       # Update the context manager with the latest full history
+       self.conversation_context_manager.update_full_history(self.conversation_history)
+
+       # Orchestrate conversation summarization if needed
+       await self._orchestrate_conversation_summarization()
+       # After potential summarization, the context manager's internal _managed_history is updated.
+       # get_contextual_history will now use this potentially summarized _managed_history.
+
 
        max_rev_attempts = 1; current_attempt = 0; plan_list = []; original_plan_json_str = ""
        final_exec_results = []
@@ -1165,11 +1296,23 @@ class TerminusOrchestrator:
 
            print(f"{plan_handler_id} Attempt {current_attempt + 1}/{max_rev_attempts + 1}: Generating/Loading plan...")
 
-           # --- Plan Generation/Loading (simplified for brevity, same as before) ---
-           history_context = prompt_constructors.get_relevant_history_for_prompt(self.conversation_history, self.max_history_items, user_prompt)
+           # --- Get Contextual Conversation History ---
+           # Use configured default values for token and turn limits for context generation
+           context_max_tokens = self.conv_ctx_mgr_config["default_max_tokens"]
+           context_desired_turns = self.conv_ctx_mgr_config["default_desired_recent_turns"]
+
+           contextual_history_data = await self.conversation_context_manager.get_contextual_history(
+               current_prompt_text=user_prompt,
+               max_tokens=context_max_tokens,
+               desired_recent_turns=context_desired_turns
+           )
+           history_context_string = self.conversation_context_manager.format_history_for_prompt(contextual_history_data)
+           print(f"{plan_handler_id} INFO: Contextual history (est. {contextual_history_data.total_token_estimate} tokens, {contextual_history_data.selected_turns_count} turns) prepared for MasterPlanner using limits: max_tokens={context_max_tokens}, desired_recent_turns={context_desired_turns}.")
+
+           # --- Plan Generation/Loading ---
            agent_capabilities_desc = self.get_agent_capabilities_description()
 
-           kb_query_gen_prompt_str = prompt_constructors.construct_kb_query_generation_prompt(user_prompt, history_context, nlu_summary_for_prompt)
+           kb_query_gen_prompt_str = prompt_constructors.construct_kb_query_generation_prompt(user_prompt, history_context_string, nlu_summary_for_prompt)
            kb_query_agent = next((a for a in self.agents if a.name == "GeneralPurposeAgent"), None) or \
                             next((a for a in self.agents if a.name == "MasterPlanner"), None)
            kb_search_query = ""
@@ -1199,15 +1342,22 @@ class TerminusOrchestrator:
 
            if current_attempt == 0:
                planning_prompt = prompt_constructors.construct_main_planning_prompt(
-                   user_prompt, history_context, nlu_summary_for_prompt,
-                   kb_general_ctx_str, kb_plan_log_ctx_str, kb_feedback_ctx_str,
-                   agent_capabilities_desc
+                   user_prompt=user_prompt,
+                   history_context=history_context_string, # Use formatted string
+                   nlu_summary=nlu_summary_for_prompt,
+                   kb_general_context=kb_general_ctx_str,
+                   kb_plan_log_context=kb_plan_log_ctx_str,
+                   kb_feedback_context=kb_feedback_ctx_str,
+                   agent_capabilities_description=agent_capabilities_desc
                )
-           else:
+           else: # Constructing a revision prompt
                print(f"{plan_handler_id} INFO: Constructing revision prompt with failure context.")
                planning_prompt = prompt_constructors.construct_revision_planning_prompt(
-                   user_prompt, history_context, nlu_summary_for_prompt,
-                   detailed_failure_ctx_for_rev, agent_capabilities_desc
+                   user_prompt=user_prompt,
+                   history_context=history_context_string, # Use formatted string
+                   nlu_summary=nlu_summary_for_prompt,
+                   failure_context=detailed_failure_ctx_for_rev,
+                   agent_capabilities_description=agent_capabilities_desc
                )
 
            planner_agent = next((a for a in self.agents if a.name == "MasterPlanner" and a.active), None)
@@ -1504,7 +1654,23 @@ class TerminusOrchestrator:
        )
        if plan_list or not plan_succeeded_this_attempt :
             current_plan_log_kb_id = await self._store_plan_execution_log_in_kb(user_prompt, first_attempt_nlu_output, original_plan_json_str, plan_succeeded_this_attempt, current_attempt + 1, final_exec_results, step_outputs, user_facing_summary)
-       self.conversation_history.append({"role": "assistant", "content": user_facing_summary, "is_plan_outcome": True, "plan_log_kb_id": current_plan_log_kb_id, "feedback_item_id": current_plan_log_kb_id, "feedback_item_type": "master_plan_log_outcome", "related_user_prompt_for_feedback": user_prompt})
+
+       # Add assistant's summary to history as a ConversationTurn object
+       assistant_turn_metadata = {
+           "is_plan_outcome": True,
+           "plan_log_kb_id": current_plan_log_kb_id,
+           "feedback_item_id": current_plan_log_kb_id, # Assuming feedback can be tied to the plan log
+           "feedback_item_type": "master_plan_log_outcome",
+           "related_user_prompt_for_feedback": user_prompt
+       }
+       assistant_turn = ConversationTurn(role="assistant", content=user_facing_summary, metadata=assistant_turn_metadata)
+       self.conversation_history.append(assistant_turn)
+       # Prune again if history exceeds max items after adding assistant turn
+       if len(self.conversation_history) > self.max_history_items:
+           self.conversation_history = self.conversation_history[-self.max_history_items:]
+       # Update context manager after assistant's turn as well
+       self.conversation_context_manager.update_full_history(self.conversation_history)
+
        return final_exec_results
 
    async def _evaluate_plan_condition(self, condition_def: Dict, step_outputs: Dict, full_plan_list: List[Dict]) -> Dict:

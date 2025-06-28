@@ -1,25 +1,21 @@
 import json
 from typing import List, Dict, Optional
 
-# Was: _get_relevant_history_for_prompt(self, user_prompt:str, full_history:bool=False) -> str
-def get_relevant_history_for_prompt(conversation_history: List[Dict], max_history_items: int, user_prompt:str, full_history:bool=False) -> str:
-   history_to_consider = conversation_history[:-1] # Exclude current user_prompt which is handled separately
-   if full_history or not history_to_consider: # if full_history or no prior turns except current
-       relevant_turns = history_to_consider[-max_history_items:]
-   else: # Select a smaller window if not full_history and there's enough history
-       relevant_turns = history_to_consider[-4:] # Default to last 4 turns for concise context
+# The function get_relevant_history_for_prompt is now removed.
+# Conversation history processing is handled by ConversationContextManager in TerminusOrchestrator
+# and the formatted history string is passed directly to the prompt constructors.
 
-   history_list = []
-   for t in relevant_turns:
-       role = t.get('role', 'unknown').capitalize()
-       content = str(t.get('content', ''))
-       history_list.append(f"{role}: {content}")
-   history_str = "\n".join(history_list)
-   return f"Relevant Conversation History:\n{history_str}\n\n" if history_str else "No relevant conversation history found.\n\n"
-
-# Was: _construct_kb_query_generation_prompt(self, user_prompt:str, history_context:str, nlu_info:str) -> str
-def construct_kb_query_generation_prompt(user_prompt:str, history_context:str, nlu_info:str) -> str:
-   return ( f"{history_context}"
+def construct_kb_query_generation_prompt(user_prompt:str, history_context_string:str, nlu_info:str) -> str:
+   """
+   Constructs a prompt for an LLM to generate a Knowledge Base search query.
+   Args:
+       user_prompt: The current user's request.
+       history_context_string: A pre-formatted string of relevant conversation history.
+       nlu_info: NLU analysis output for the current user_prompt.
+   Returns:
+       A string prompt for the LLM.
+   """
+   return ( f"Conversation History:\n{history_context_string}\n\n" # Use the passed string
             f"Current User Request: '{user_prompt}'\n"
             f"NLU Analysis of Request: {nlu_info}\n\n"
             f"Your task: Based on request, history, and NLU, generate a concise search query (max 5-7 words) for a knowledge base (KB) containing general info (docs, web content, code explanations). "
