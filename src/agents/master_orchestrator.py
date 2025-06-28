@@ -44,7 +44,8 @@ from ..core import prompt_constructors
 from ..core.rl_logger import RLExperienceLogger
 from ..core.async_tools import AsyncTask, AsyncTaskStatus
 from ..core.event_system import SystemEvent
-from ..core.conversation_history import ConversationTurn, ConversationContextManager # New Imports
+from ..core.conversation_history import ConversationTurn, ConversationContextManager
+from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC # New KB Schema Imports
 
 
 # --- New/Modified Dataclasses for Service Definitions ---
@@ -578,12 +579,16 @@ class TerminusOrchestrator:
        Formerly _handle_new_kb_content_for_analysis.
        """
        kb_id = event.payload.get("kb_id")
-       source_op = event.payload.get("source_operation", "unknown_source") # Get source from payload
-       handler_id = f"[ContentAnalysisHandler event_id:{event.event_id} kb_id:{kb_id} src_op:{source_op}]"
+       # Extract metadata and schema_type from the event payload, which should have the richer metadata.
+       event_metadata = event.payload.get("metadata", {})
+       schema_type = event_metadata.get("kb_schema_type")
+       source_op = event_metadata.get("source", event.payload.get("source_operation", "unknown_source"))
 
-       # Avoid analyzing feedback reports or plan logs themselves with this generic handler
-       if source_op in ["feedback_analysis_report", "plan_execution_log"]:
-           print(f"{handler_id} INFO: Skipping content analysis for KB item from source operation '{source_op}'.")
+       handler_id = f"[ContentAnalysisHandler event_id:{event.event_id} kb_id:{kb_id} schema:{schema_type} src_op:{source_op}]"
+
+       # Skip analysis for certain source operations or schema types that don't need generic keyword/topic extraction.
+       if source_op in ["feedback_analysis_report"] or schema_type in ["FeedbackReport"]: # Example, adjust as needed
+           print(f"{handler_id} INFO: Skipping content analysis for KB item from source '{source_op}' or schema '{schema_type}'.")
            return
 
        print(f"{handler_id} START: Processing event type: {event.event_type}")
@@ -593,26 +598,63 @@ class TerminusOrchestrator:
            print(f"{handler_id} ERROR: No valid kb_id in event payload. Cannot process."); return
 
        try:
-           item_data = self.knowledge_collection.get(ids=[kb_id], include=["documents", "metadatas"])
-           if not (item_data and item_data.get('ids') and item_data['ids'][0]):
-               print(f"{handler_id} ERROR: KB item '{kb_id}' not found for analysis."); return
+           # Fetch the item from ChromaDB to get its document string and existing full metadata
+           item_data_from_db = self.knowledge_collection.get(ids=[kb_id], include=["documents", "metadatas"])
+           if not (item_data_from_db and item_data_from_db.get('ids') and item_data_from_db['ids'][0]):
+               print(f"{handler_id} ERROR: KB item '{kb_id}' not found in ChromaDB for analysis."); return
 
-           document_content = item_data['documents'][0]
-           doc_metadata = item_data['metadatas'][0] if item_data.get('metadatas') and item_data['metadatas'][0] else {}
+           doc_json_string = item_data_from_db['documents'][0] if item_data_from_db.get('documents') and item_data_from_db['documents'][0] else None
+           db_metadata = item_data_from_db['metadatas'][0] if item_data_from_db.get('metadatas') and item_data_from_db['metadatas'][0] else {}
 
-           if not document_content:
-               print(f"{handler_id} INFO: KB item '{kb_id}' has empty content. Skipping analysis."); return
+           # Re-confirm schema_type from DB metadata as source of truth for what's stored.
+           # Event payload schema_type is what was intended at storage time.
+           db_schema_type = db_metadata.get('kb_schema_type', schema_type) # Prefer DB if available, else from event
 
-           if doc_metadata.get("analysis_by_agent") == "ContentAnalysisAgent" and \
-              (doc_metadata.get("extracted_keywords") or doc_metadata.get("extracted_topics")):
-               print(f"{handler_id} INFO: Content for KB ID '{kb_id}' already analyzed by ContentAnalysisAgent. Skipping re-analysis.")
+           if not doc_json_string:
+               print(f"{handler_id} INFO: KB item '{kb_id}' has empty document string in DB. Skipping analysis."); return
+
+           # Check if already analyzed by this mechanism (using DB metadata)
+           if db_metadata.get("analysis_by_agent") == "ContentAnalysisAgent" and \
+              (db_metadata.get("extracted_keywords") or db_metadata.get("extracted_topics")):
+               print(f"{handler_id} INFO: Content for KB ID '{kb_id}' (schema: {db_schema_type}) already analyzed by ContentAnalysisAgent. Skipping re-analysis.")
                return
+
+           text_for_analysis = ""
+           if db_schema_type == "PlanExecutionRecord":
+               try:
+                   plan_rec = PlanExecutionRecordDC.from_json_string(doc_json_string)
+                   text_for_analysis = f"User Request: {plan_rec.original_user_request}\nOutcome Summary: {plan_rec.final_summary_to_user}"
+                   print(f"{handler_id} INFO: Extracted text from PlanExecutionRecord for analysis.")
+               except Exception as e_plan_parse:
+                   print(f"{handler_id} WARNING: Could not parse PlanExecutionRecord for KB ID '{kb_id}'. Using raw JSON string. Error: {e_plan_parse}")
+                   text_for_analysis = doc_json_string # Fallback to raw JSON string
+           elif db_schema_type == "WebServiceScrapeResult":
+               try:
+                   scrape_res = WebServiceScrapeResultDC.from_json_string(doc_json_string)
+                   text_for_analysis = f"Title: {scrape_res.title}\nSummary: {scrape_res.main_content_summary}"
+                   print(f"{handler_id} INFO: Extracted text from WebServiceScrapeResult for analysis.")
+               except Exception as e_scrape_parse:
+                   print(f"{handler_id} WARNING: Could not parse WebServiceScrapeResult for KB ID '{kb_id}'. Using raw JSON string. Error: {e_scrape_parse}")
+                   text_for_analysis = doc_json_string # Fallback
+           elif db_schema_type == "CodeExplanation": # Code explanations might be better served by their own keywords
+                print(f"{handler_id} INFO: Skipping generic keyword/topic analysis for CodeExplanation schema '{db_schema_type}'. Assumed to have its own keywords.")
+                return
+           else: # Default to using the full document string (which might be plain text or JSON of unknown schema)
+               text_for_analysis = doc_json_string
+               if db_schema_type:
+                   print(f"{handler_id} INFO: Unknown schema '{db_schema_type}'. Analyzing raw document content.")
+               else:
+                   print(f"{handler_id} INFO: No schema type. Analyzing raw document content.")
+
+
+           if not text_for_analysis.strip():
+               print(f"{handler_id} INFO: No text content derived for analysis from KB ID '{kb_id}' (schema: {db_schema_type}). Skipping."); return
 
            analysis_agent = next((a for a in self.agents if a.name == "ContentAnalysisAgent" and a.active), None)
            if not analysis_agent:
                print(f"{handler_id} ERROR: ContentAnalysisAgent not found/active. Skipping."); return
 
-           analysis_prompt = (f"Analyze the following text content:\n---\n{document_content[:15000]}\n---\n"
+           analysis_prompt = (f"Analyze the following text content derived from a knowledge base item (ID: {kb_id}, Schema: {db_schema_type or 'N/A'}):\n---\n{text_for_analysis[:15000]}\n---\n"
                               f"Provide output as a JSON object with 'keywords' (comma-separated string of 2-5 relevant keywords, or 'NONE') "
                               f"and 'topics' (1-3 comma-separated strings describing main topics, or 'NONE').\n"
                               f"Example: {{\"keywords\": \"k1, k2, k3\", \"topics\": \"Topic A, Topic B\"}}\nJSON Output:")
@@ -1014,47 +1056,131 @@ class TerminusOrchestrator:
             return {"status": "error", "data": None, "message": f"CodeMaster LLM call failed for syntax validation: {llm_response.get('response')}", "error_code": "LLM_CALL_FAILED"}
 
 
-   async def store_knowledge(self, content: str, metadata: Optional[Dict] = None, content_id: Optional[str] = None) -> Dict:
-       if self.knowledge_collection is None:
-           return {"status": "error", "message": "KB not initialized."}
-       try:
-           final_id = content_id or str(uuid.uuid4())
-           # Ensure metadata is suitable for ChromaDB (basic types) and also for event payload.
-           # For ChromaDB, it will convert non-string/int/float/bool values.
-           # For event payload, we might want to keep original structure if more complex.
-           chroma_meta = {k: (str(v) if not isinstance(v, (str, int, float, bool)) else v) for k, v in metadata.items()} if metadata else {}
+   async def store_knowledge(
+        self,
+        content: Optional[str] = None, # Becomes optional if structured_content is primary
+        metadata: Optional[Dict] = None,
+        content_id: Optional[str] = None,
+        schema_type: Optional[str] = None,      # New: e.g., "PlanExecutionRecord", "CodeExplanation"
+        structured_content: Optional[BaseKBSchema] = None # New: Instance of a KB dataclass
+    ) -> Dict:
+        if self.knowledge_collection is None:
+            return {"status": "error", "message": "KB not initialized."}
 
-           self.knowledge_collection.add(ids=[final_id], documents=[content], metadatas=[chroma_meta] if chroma_meta else [None])
+        final_id = content_id or str(uuid.uuid4())
+        final_metadata = metadata.copy() if metadata else {} # Ensure we have a mutable dict
+        document_content_for_chroma: str
 
-           # Publish event after successful storage
-           event_payload = {
-               "kb_id": final_id,
-               "content_preview": content[:200] + "..." if len(content) > 200 else content, # Keep preview reasonable
-               "metadata": metadata if metadata else {}, # Send original metadata in event
-               "source_operation": metadata.get("source", "unknown") if metadata else "unknown" # e.g. "web_scrape", "plan_execution_log"
-           }
-           await self.publish_event(
-               event_type="kb.content.added",
-               source_component="TerminusOrchestrator.KnowledgeBase",
-               payload=event_payload
-           )
-           print(f"[store_knowledge] Successfully stored and published kb.content.added event for KB ID: {final_id}")
-           return {"status": "success", "id": final_id, "message": "Content stored and event published."}
-       except Exception as e:
-           print(f"[store_knowledge] Error storing to KB or publishing event: {e}")
-           return {"status": "error", "message": str(e)}
+        if structured_content:
+            if not isinstance(structured_content, BaseKBSchema):
+                return {"status": "error", "message": "structured_content is not a valid BaseKBSchema instance."}
+            if not schema_type: # Infer schema_type if not explicitly provided but structured_content is
+                schema_type = structured_content.__class__.__name__.replace("DC","") # e.g. PlanExecutionRecordDC -> PlanExecutionRecord
+                print(f"[store_knowledge] INFO: Inferred schema_type as '{schema_type}' from structured_content.")
+
+            document_content_for_chroma = structured_content.to_json_string()
+            final_metadata['kb_schema_type'] = schema_type # Crucial for typed retrieval
+            # Optionally, add other key fields from structured_content to metadata for direct filtering if needed
+            # e.g., if structured_content is PlanExecutionRecordDC:
+            # if schema_type == "PlanExecutionRecord" and hasattr(structured_content, 'status'):
+            #     final_metadata['plan_status'] = structured_content.status
+            # if schema_type == "PlanExecutionRecord" and hasattr(structured_content, 'primary_intent'):
+            #     final_metadata['plan_intent'] = structured_content.primary_intent
+
+        elif content is not None: # Standard text content
+            document_content_for_chroma = content
+            if schema_type: # If schema_type is provided for plain text, store it.
+                 final_metadata['kb_schema_type'] = schema_type
+        else:
+            return {"status": "error", "message": "Either 'content' or 'structured_content' must be provided."}
+
+        try:
+            # Ensure metadata for ChromaDB contains only basic types
+            chroma_meta_safe = {k: (str(v) if not isinstance(v, (str, int, float, bool)) else v) for k, v in final_metadata.items()}
+
+            self.knowledge_collection.add(
+                ids=[final_id],
+                documents=[document_content_for_chroma],
+                metadatas=[chroma_meta_safe] if chroma_meta_safe else [None]
+            )
+
+            # Publish event after successful storage
+            event_payload = {
+                "kb_id": final_id,
+                "content_preview": document_content_for_chroma[:200] + "..." if len(document_content_for_chroma) > 200 else document_content_for_chroma,
+                "metadata": final_metadata, # Send original, potentially richer metadata in event
+                "source_operation": final_metadata.get("source", "unknown"),
+                "schema_type": schema_type # Include schema_type in event
+            }
+            await self.publish_event(
+                event_type="kb.content.added",
+                source_component="TerminusOrchestrator.KnowledgeBase",
+                payload=event_payload
+            )
+            print(f"[store_knowledge] Successfully stored KB ID: {final_id} (Schema: {schema_type or 'text'}) and published event.")
+            return {"status": "success", "id": final_id, "message": "Content stored and event published."}
+        except Exception as e:
+            print(f"[store_knowledge] Error storing to KB or publishing event for ID {final_id}: {e}")
+            return {"status": "error", "message": str(e)}
 
    async def retrieve_knowledge(self, query_text: str, n_results: int = 5, filter_metadata: Optional[Dict] = None) -> Dict:
-        if self.knowledge_collection is None: return {"status": "error", "results": [], "message": "KB not initialized."}
+        if self.knowledge_collection is None:
+            return {"status": "error", "results": [], "message": "KB not initialized."}
+
+        # Ensure filter_metadata uses values suitable for ChromaDB's 'where' clause
+        # For this iteration, assuming direct string/numeric values in filter_metadata are fine.
+        # Complex filters like $in, $nin might need specific construction if passed via filter_metadata.
+        chroma_where_filter = filter_metadata if filter_metadata else None
+
         try:
-            clean_filter = {k:v for k,v in filter_metadata.items() if isinstance(v,(str,int,float,bool))} if filter_metadata else None
-            q_res = self.knowledge_collection.query(query_texts=[query_text],n_results=max(1,n_results),where=clean_filter)
+            q_res = self.knowledge_collection.query(
+                query_texts=[query_text] if query_text else None, # Allow query by filter only if query_text is None/empty
+                n_results=max(1, n_results),
+                where=chroma_where_filter,
+                include=["documents", "metadatas", "distances"] # Ensure all are included
+            )
+
             results = []
             if q_res and q_res.get('ids') and q_res['ids'][0]:
                 for i, item_id in enumerate(q_res['ids'][0]):
-                    results.append({"id":item_id, "document":q_res['documents'][0][i], "metadata":q_res['metadatas'][0][i], "distance":q_res['distances'][0][i]})
-            return {"status":"success", "results":results}
-        except Exception as e: return {"status":"error", "results":[], "message":str(e)}
+                    doc_content_str = q_res['documents'][0][i] if q_res['documents'] and q_res['documents'][0] else None
+                    metadata = q_res['metadatas'][0][i] if q_res['metadatas'] and q_res['metadatas'][0] else {}
+                    distance = q_res['distances'][0][i] if q_res['distances'] and q_res['distances'][0] else None
+
+                    result_item: Dict[str, Any] = {
+                        "id": item_id,
+                        "document_text": doc_content_str, # Always include the raw document string
+                        "structured_document": None,      # Placeholder for deserialized object
+                        "metadata": metadata,
+                        "distance": distance
+                    }
+
+                    schema_type = metadata.get('kb_schema_type')
+                    if schema_type and doc_content_str:
+                        # Attempt to deserialize if schema_type is known
+                        # This requires mapping schema_type string to the actual dataclass
+                        schema_class_map = {
+                            "PlanExecutionRecord": PlanExecutionRecordDC,
+                            "CodeExplanation": CodeExplanationDC,
+                            "WebServiceScrapeResult": WebServiceScrapeResultDC,
+                            # Add other schema types here as they are defined
+                        }
+                        TargetClass = schema_class_map.get(schema_type)
+                        if TargetClass:
+                            try:
+                                result_item["structured_document"] = TargetClass.from_json_string(doc_content_str)
+                                print(f"[retrieve_knowledge] Successfully deserialized KB ID {item_id} to schema {schema_type}.")
+                            except Exception as e_deserialize:
+                                print(f"[retrieve_knowledge] WARNING: Failed to deserialize KB ID {item_id} (schema: {schema_type}) from JSON string. Error: {e_deserialize}. Falling back to text.")
+                        else:
+                            print(f"[retrieve_knowledge] WARNING: Unknown kb_schema_type '{schema_type}' for KB ID {item_id}. Treating as text.")
+
+                    results.append(result_item)
+
+            return {"status": "success", "results": results}
+        except Exception as e:
+            print(f"[retrieve_knowledge] Error querying ChromaDB: {e}")
+            return {"status": "error", "results": [], "message": str(e)}
 
    def store_user_feedback(self, item_id: str, item_type: str, rating: str, comment: Optional[str]=None, current_mode: Optional[str]=None, user_prompt_preview: Optional[str]=None) -> bool:
        try:
@@ -1751,32 +1877,96 @@ class TerminusOrchestrator:
            return None
 
        final_plan_status_str = "success" if final_status_bool else "failure"
-       # ... (rest of the summary_dict and kb_meta construction remains the same) ...
-       summary_list_for_log = [{"step_id":s.get("step_id","N/A"), "agent_name":s.get("agent","N/A"), "status":s.get("status","unknown"), "response_preview":str(s.get("response",""))[:150]+"..."} for s in step_results_final_attempt]
-       nlu_analysis_data = {}
-       if isinstance(nlu_output_orig, dict): nlu_analysis_data = { "intent":nlu_output_orig.get("intent"), "intent_scores":nlu_output_orig.get("intent_scores"), "entities":nlu_output_orig.get("entities",[]) }
-       summary_dict = { "version":"1.3_service_calls_rl_log_v1", "original_user_request":user_prompt_orig, "nlu_analysis_on_request": nlu_analysis_data, "plan_json_executed_final_attempt":plan_json_final_attempt, "execution_summary":{ "overall_status":final_plan_status_str, "total_attempts":num_attempts, "final_attempt_step_results":summary_list_for_log, "outputs_from_successful_steps_final_attempt": {k: (str(v)[:200]+"..." if len(str(v)) > 200 else v) for k,v in outputs_final_attempt.items()} }, "user_facing_plan_outcome_summary":user_facing_summary_text, "log_timestamp_iso":datetime.datetime.utcnow().isoformat() }
-       content_str = json.dumps(summary_dict, indent=2)
-       kb_meta = {
-           "source":"plan_execution_log",
-           "overall_status":final_plan_status_str,
-           "user_request_preview":user_prompt_orig[:150],
-           "primary_intent":nlu_analysis_data.get("intent","N/A"),
-           "log_timestamp_iso":summary_dict["log_timestamp_iso"]
-       }
-       if nlu_analysis_data.get("entities"):
-           for i, ent in enumerate(nlu_analysis_data["entities"][:3]):
-               kb_meta[f"entity_{i+1}_type"]=ent.get("type","UNK")
-               kb_meta[f"entity_{i+1}_text"]=str(ent.get("text",""))[:50]
 
-       # Call store_knowledge, which will now publish the "kb.content.added" event internally
-       store_result = await self.store_knowledge(content_str, kb_meta, content_id=f"planlog_{uuid.uuid4()}")
+       summary_list_for_log = [
+           {"step_id": s.get("step_id", "N/A"),
+            "agent_name": s.get("agent_name", s.get("agent", "N/A")), # Use agent_name from new structure
+            "status": s.get("status", "unknown"),
+            "response_preview": str(s.get("response", ""))[:150] + "..."
+           } for s in step_results_final_attempt
+       ]
+
+       nlu_analysis_data_for_log = {}
+       if isinstance(nlu_output_orig, dict):
+           nlu_analysis_data_for_log = {
+               "intent": nlu_output_orig.get("intent"),
+               "intent_scores": nlu_output_orig.get("intent_scores"),
+               "entities": nlu_output_orig.get("entities", [])
+           }
+
+       # Create PlanExecutionRecordDC instance
+       plan_record = PlanExecutionRecordDC(
+           # record_id and timestamp_utc are auto-generated
+           original_user_request=user_prompt_orig,
+           primary_intent=nlu_analysis_data_for_log.get("intent"),
+           nlu_analysis_raw=nlu_analysis_data_for_log if nlu_analysis_data_for_log else None, # Store the whole NLU dict
+           status=final_plan_status_str,
+           total_attempts=num_attempts,
+           plan_json_executed_final_attempt=plan_json_final_attempt, # This is already a JSON string
+           final_summary_to_user=user_facing_summary_text,
+           step_results_summary=summary_list_for_log,
+           final_step_outputs={k: (str(v)[:200]+"..." if len(str(v)) > 200 else v) for k,v in outputs_final_attempt.items()},
+           rl_interaction_id=getattr(self, 'rl_interaction_id', None) # Assuming rl_interaction_id is available on self or passed
+                                                                    # For now, this might be None if not set up in execute_master_plan context
+                                                                    # This was just an example, rl_interaction_id is set in execute_master_plan
+                                                                    # Let's assume it's available via a property or passed if needed.
+                                                                    # For this refactor, let's make it simple and pass it if available, else None.
+                                                                    # Actually, rl_interaction_id is defined in execute_master_plan, not directly here.
+                                                                    # For now, this field can be None or we can pass rl_interaction_id to this func.
+                                                                    # Let's assume it's not critical for the schema structure itself for now.
+       )
+
+       # Metadata for top-level ChromaDB filtering (complementing the structured data)
+       kb_meta_for_filtering = {
+           "source": "plan_execution_log", # This will be part of event payload via store_knowledge
+           "overall_status": final_plan_status_str,
+           "user_request_preview": user_prompt_orig[:150],
+           "primary_intent": plan_record.primary_intent,
+           "log_timestamp_iso": plan_record.timestamp_utc # Use the record's timestamp
+       }
+       if plan_record.nlu_analysis_raw and plan_record.nlu_analysis_raw.get("entities"):
+           for i, ent in enumerate(plan_record.nlu_analysis_raw["entities"][:3]):
+               kb_meta_for_filtering[f"entity_{i+1}_type"] = ent.get("type", "UNK")
+               kb_meta_for_filtering[f"entity_{i+1}_text"] = str(ent.get("text", ""))[:50]
+
+       # Call store_knowledge with the structured content
+       store_result = await self.store_knowledge(
+           structured_content=plan_record,
+           schema_type="PlanExecutionRecord", # Explicitly state schema type
+           metadata=kb_meta_for_filtering,
+           content_id=plan_record.record_id # Use the dataclass generated ID
+       )
 
        if store_result.get("status") == "success":
-           stored_kb_id = store_result.get("id")
-           print(f"MasterPlanner: Plan log storage successful. Stored KB ID: {stored_kb_id}")
-           # No direct publish_message here anymore; store_knowledge handles the generic kb.content.added event.
-           # If a more specific event "kb.plan_execution_log.added" is needed, store_knowledge
+           stored_kb_id = store_result.get("id") # This should be same as plan_record.record_id
+           # Update the plan_record with the chroma_db_id if they are different, or ensure consistency.
+           # For now, we assume content_id sets the ChromaDB ID.
+           # If store_knowledge internally generates a *different* final_id for Chroma, we'd need to update plan_record.chroma_db_id
+           print(f"MasterPlanner: Plan log storage successful. Stored KB ID: {stored_kb_id} (Record ID: {plan_record.record_id})")
+
+           # The generic "kb.content.added" event is published by store_knowledge.
+           # If a more specific "kb.plan_execution_log.added" event is still desired for some subscribers,
+           # it could be published here additionally.
+           # Example:
+           # await self.publish_event(
+           #     event_type="kb.plan_execution_log.added", # More specific event
+           #     source_component="MasterPlanner",
+           #     payload={
+           #         "kb_id": stored_kb_id,
+           #         "record_id": plan_record.record_id,
+           #         "original_request_preview": user_prompt_orig[:150],
+           #         "overall_status": final_plan_status_str,
+           #         "primary_intent": plan_record.primary_intent
+           #     }
+           # )
+           return stored_kb_id
+       else:
+           print(f"MasterPlanner: Plan log storage failed. Message: {store_result.get('message')}")
+           return None
+
+   async def execute_agent(self, agent: Agent, prompt: str, context: Optional[Dict] = None) -> Dict:
+        print(f"Orchestrator: Executing agent {agent.name} with prompt (first 100 chars): {prompt[:100]}")
+        if agent.name == "WebCrawler":
            # could be made more flexible, or we could publish that specific event here too.
            # For now, relying on the generic event from store_knowledge.
            # Example of publishing a more specific event if needed:
@@ -1824,8 +2014,30 @@ class TerminusOrchestrator:
                         "agent_used": agent.name,
                         "summarizer_used": doc_summarizer_agent.name if doc_summarizer_agent else "N/A"
                     }
+
+                    # Create WebServiceScrapeResultDC instance
+                    scrape_record = WebServiceScrapeResultDC(
+                        # scrape_id and timestamp_utc are auto-generated
+                        url=url_to_scrape,
+                        title=soup.title.string if soup.title else None, # Basic title extraction
+                        main_content_summary=summary,
+                        original_content_length=len(text_content),
+                        # extracted_entities could be populated by another agent/service call if needed
+                        source_agent_name=agent.name
+                    )
+                    # Add hash of full content if we decide to implement it
+                    # import hashlib
+                    # scrape_record.full_content_hash = hashlib.sha256(text_content.encode('utf-8')).hexdigest()
+
                     # Await store_knowledge to ensure event is published if successful
-                    store_kb_result = await self.store_knowledge(content=summary, metadata=kb_metadata)
+                    store_kb_result = await self.store_knowledge(
+                        structured_content=scrape_record,
+                        schema_type="WebServiceScrapeResult", # Explicitly state schema type
+                        metadata=kb_metadata, # Pass original kb_metadata as well, it contains URL, agent, etc.
+                                              # store_knowledge will merge kb_schema_type into this.
+                        content_id=scrape_record.scrape_id # Use dataclass generated ID
+                    )
+
                     if store_kb_result.get("status") == "success":
                         print(f"WebCrawler: Successfully stored scraped content from {url_to_scrape} to KB (ID: {store_kb_result.get('id')}).")
                         return {"status": "success", "agent": agent.name, "model": agent.model, "response_type": "scrape_result", "response": f"Successfully scraped and summarized content from {url_to_scrape}. Summary stored in KB (ID: {store_kb_result.get('id')}).", "summary": summary, "original_url": url_to_scrape, "full_content_length": len(text_content), "kb_id": store_kb_result.get("id")}
