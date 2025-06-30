@@ -1090,6 +1090,61 @@ class TerminusOrchestrator:
         else:
             return {"status": "error", "data": None, "message": f"CodeMaster LLM call failed for syntax validation: {llm_response.get('response')}", "error_code": "LLM_CALL_FAILED"}
 
+   async def _service_docsummarizer_summarize_text(self, params: Dict, service_definition: AgentServiceDefinition) -> Dict:
+        """
+        Service handler for DocSummarizer to summarize text.
+        Invokes the DocSummarizer agent (LLM) to perform the summarization.
+        """
+        log_prefix = f"[{self.__class__.__name__}._service_docsummarizer_summarize_text]"
+        text_to_summarize = params.get("text_to_summarize")
+
+        if not text_to_summarize or not isinstance(text_to_summarize, str) or not text_to_summarize.strip():
+            return {"status": "error", "data": None, "message": "Missing or empty 'text_to_summarize' parameter.", "error_code": "MISSING_PARAMETER"}
+
+        summarizer_agent = next((a for a in self.agents if a.name == "DocSummarizer" and a.active), None)
+        if not summarizer_agent:
+            return {"status": "error", "data": None, "message": "DocSummarizer agent not available.", "error_code": "AGENT_UNAVAILABLE"}
+
+        # Construct prompt for the DocSummarizer LLM
+        # Limit input to avoid exceeding LLM context limits for very long texts.
+        # The summarization task itself should be robust to this.
+        max_input_length = 15000 # Example limit, could be configurable
+        summary_prompt = (
+            f"Please provide a concise summary of the following text. Focus on the key points and main information.\n\n"
+            f"TEXT TO SUMMARIZE:\n```\n{text_to_summarize[:max_input_length]}\n```\n\nCONCISE SUMMARY:"
+        )
+
+        print(f"{log_prefix} Calling DocSummarizer agent for summarization. Text length: {len(text_to_summarize)} (truncated to {max_input_length} for prompt).")
+        llm_response_or_task = await self.execute_agent(summarizer_agent, summary_prompt)
+
+        # Handle the response from execute_agent (which might be pending_async)
+        if llm_response_or_task.get("status") == "pending_async":
+            task_id = llm_response_or_task["task_id"]
+            print(f"{log_prefix} Summarization task {task_id} submitted. Propagating pending_async.")
+            # Propagate the pending_async status as per the service call handling design
+            return {
+                "status": "pending_async",
+                "task_id": task_id,
+                "message": f"Summarization task initiated by DocSummarizer (task_id: {task_id})."
+            }
+
+        # If execute_agent returned a synchronous result (e.g., immediate error or direct success for non-LLM)
+        # This path is less likely for an LLM-based summarizer but included for completeness.
+        if llm_response_or_task.get("status") == "success":
+            summary_text = llm_response_or_task.get("response")
+            if summary_text and summary_text.strip():
+                print(f"{log_prefix} Summarization (sync) successful.")
+                # The 'data' field for this service should match the 'returns' type in agents.json, which is "string".
+                # So, the summary_text itself is the data.
+                return {"status": "success", "data": summary_text, "message": "Text summarized successfully (synchronous path)."}
+            else:
+                print(f"{log_prefix} Summarization (sync) returned empty response.")
+                return {"status": "error", "data": None, "message": "Summarization (sync) resulted in an empty summary.", "error_code": "EMPTY_SUMMARY"}
+        else: # Synchronous error from execute_agent
+            error_msg = llm_response_or_task.get("response", "Unknown error during summarization agent call.")
+            print(f"{log_prefix} Summarization agent call (sync) failed: {error_msg}")
+            return {"status": "error", "data": None, "message": error_msg, "error_code": "LLM_CALL_FAILED_SYNC"}
+
 
    async def store_knowledge(
         self,
@@ -1515,10 +1570,65 @@ class TerminusOrchestrator:
            kb_plan_log_ctx_str = await self._get_formatted_plan_log_insights(first_attempt_nlu_output, plan_handler_id)
            kb_feedback_ctx_str = await self._get_formatted_feedback_insights(plan_handler_id)
 
+           # --- Query Knowledge Graph for related items based on NLU entities/topics ---
+           kg_derived_context_str = ""
+           if self.kg_instance and first_attempt_nlu_output.get("status") == "success":
+               all_related_kg_items = []
+               # Get entities from NLU
+               entities = first_attempt_nlu_output.get("entities", [])
+               for entity in entities[:2]: # Limit number of entities to query for KG
+                   entity_text_clean = entity.get("text","").strip().lower().replace(' ', '_')
+                   if entity_text_clean:
+                       # Node ID for keywords (which might represent entities)
+                       keyword_node_id = f"keyword_{entity_text_clean}"
+                       # Find KB items (sources) that have this keyword (target)
+                       related_items = self.kg_instance.get_source_nodes_related_to_target(
+                           target_node_id=keyword_node_id,
+                           relationship_types=["HAS_KEYWORD"], # Edge: KB_Item -> HAS_KEYWORD -> Keyword_Node
+                           limit=2
+                       )
+                       all_related_kg_items.extend(related_items)
+
+               # Get primary intent as a potential topic to search for
+               primary_intent = first_attempt_nlu_output.get("intent")
+               if primary_intent:
+                   # Standardized node ID format for topics
+                   topic_node_id = f"topic_{primary_intent.lower().replace(' ', '_')}"
+                   # Find KB items (sources) that have this topic (target)
+                   related_items_by_intent_topic = self.kg_instance.get_source_nodes_related_to_target(
+                       target_node_id=topic_node_id,
+                       relationship_types=["HAS_TOPIC"], # Edge: KB_Item -> HAS_TOPIC -> Topic_Node
+                       limit=2
+                   )
+                   all_related_kg_items.extend(related_items_by_intent_topic)
+
+               # Deduplicate and format for prompt
+               unique_related_kg_items_dict = {item['node_id']: item for item in all_related_kg_items}
+               unique_related_kg_items = list(unique_related_kg_items_dict.values())
+
+               if unique_related_kg_items:
+                   formatted_kg_derived_entries = []
+                   for item in unique_related_kg_items[:3]: # Limit total KG derived items in prompt
+                       preview = item.get('content_preview', 'N/A')
+                       item_type = item.get('node_type', 'Unknown')
+                       # 'related_to_target_via' is the key from get_source_nodes_related_to_target
+                       related_via = item.get('related_to_target_via', 'unknown relation')
+                       formatted_kg_derived_entries.append(f"  - ID: {item['node_id']} (Type: {item_type}, Related to NLU query via: {related_via}): \"{preview[:100]}...\"")
+                   if formatted_kg_derived_entries:
+                       kg_derived_context_str = "Knowledge Graph Derived Context (KB items related to NLU entities/topics):\n" + "\n".join(formatted_kg_derived_entries) + "\n\n"
+                       print(f"[{plan_handler_id}] INFO: Found {len(unique_related_kg_items)} unique KG derived items. Added to context.")
+                   else:
+                       print(f"[{plan_handler_id}] INFO: No KG derived items formatted for prompt after filtering/processing.")
+               else:
+                   print(f"[{plan_handler_id}] INFO: No unique KG derived items found from entity/topic graph queries.")
+           else:
+               print(f"[{plan_handler_id}] INFO: KG instance not available or NLU failed, skipping KG derived context.")
+
            current_rl_state_kb_summary = {
                "general_hits_count": len(kb_general_ctx_str.splitlines()) -1 if kb_general_ctx_str.strip() else 0,
                "plan_log_hits_count": len(kb_plan_log_ctx_str.splitlines()) -1 if kb_plan_log_ctx_str.strip() else 0,
                "feedback_hits_count": len(kb_feedback_ctx_str.splitlines()) -1 if kb_feedback_ctx_str.strip() else 0,
+               "kg_derived_hits_count": len(kg_derived_context_str.splitlines()) -1 if kg_derived_context_str.strip() else 0, # Added
            }
            current_rl_state = self._construct_rl_state(user_prompt, first_attempt_nlu_output, current_rl_state_kb_summary, None)
            current_rl_action = "Action_DefaultPrompt_InitialLog"
@@ -1532,9 +1642,10 @@ class TerminusOrchestrator:
            if current_attempt == 0:
                planning_prompt = prompt_constructors.construct_main_planning_prompt(
                    user_prompt=user_prompt,
-                   history_context=history_context_string, # Use formatted string
+                   history_context=history_context_string,
                    nlu_summary=nlu_summary_for_prompt,
                    kb_general_context=kb_general_ctx_str,
+                   kg_derived_context=kg_derived_context_str, # Pass new KG context
                    kb_plan_log_context=kb_plan_log_ctx_str,
                    kb_feedback_context=kb_feedback_ctx_str,
                    agent_capabilities_description=agent_capabilities_desc

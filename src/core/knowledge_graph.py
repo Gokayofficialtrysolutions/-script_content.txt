@@ -153,6 +153,84 @@ class KnowledgeGraph:
             print(f"KnowledgeGraph: Error getting edges: {e}")
         return results
 
+    def get_related_nodes(self, source_node_id: str, relationship_types: Optional[list[str]] = None, limit: int = 5) -> list:
+        """
+        Retrieves nodes related to a source_node_id via specified relationship types.
+        Returns a list of target_node details.
+        """
+        related_nodes_data = []
+        if not self.get_node(source_node_id): # Ensure source node exists
+            # print(f"KnowledgeGraph: Source node '{source_node_id}' for get_related_nodes not found.")
+            return []
+
+        query = """
+            SELECT DISTINCT n.node_id, n.node_type, n.content_preview, n.created_timestamp_iso, n.metadata_json, e.relationship_type
+            FROM kb_nodes n
+            JOIN kb_edges e ON n.node_id = e.target_node_id
+            WHERE e.source_node_id = ?
+        """
+        params: list[Any] = [source_node_id]
+
+        if relationship_types and len(relationship_types) > 0:
+            placeholders = ','.join('?' for _ in relationship_types)
+            query += f" AND e.relationship_type IN ({placeholders})"
+            params.extend(relationship_types)
+
+        query += " ORDER BY e.weight DESC, e.created_timestamp_iso DESC LIMIT ?" # Prioritize by weight then recency
+        params.append(limit)
+
+        try:
+            self.cursor.execute(query, params)
+            for row in self.cursor.fetchall():
+                metadata = json.loads(row[4]) if row[4] else None
+                related_nodes_data.append({
+                    "node_id": row[0], "node_type": row[1], "content_preview": row[2],
+                    "created_timestamp_iso": row[3], "metadata": metadata,
+                    "related_via": row[5] # The relationship type from the edge
+                })
+        except sqlite3.Error as e:
+            print(f"KnowledgeGraph: Error in get_related_nodes for source '{source_node_id}': {e}")
+        return related_nodes_data
+
+    def get_source_nodes_related_to_target(self, target_node_id: str, relationship_types: Optional[list[str]] = None, limit: int = 5) -> list:
+        """
+        Retrieves source nodes related to a target_node_id via specified relationship types.
+        Returns a list of source_node details.
+        """
+        source_nodes_data = []
+        if not self.get_node(target_node_id): # Ensure target node exists
+            # print(f"KnowledgeGraph: Target node '{target_node_id}' for get_source_nodes_related_to_target not found.")
+            return []
+
+        query = """
+            SELECT DISTINCT n.node_id, n.node_type, n.content_preview, n.created_timestamp_iso, n.metadata_json, e.relationship_type
+            FROM kb_nodes n
+            JOIN kb_edges e ON n.node_id = e.source_node_id
+            WHERE e.target_node_id = ?
+        """
+        params: list[Any] = [target_node_id]
+
+        if relationship_types and len(relationship_types) > 0:
+            placeholders = ','.join('?' for _ in relationship_types)
+            query += f" AND e.relationship_type IN ({placeholders})"
+            params.extend(relationship_types)
+
+        query += " ORDER BY e.weight DESC, e.created_timestamp_iso DESC LIMIT ?" # Prioritize by weight then recency
+        params.append(limit)
+
+        try:
+            self.cursor.execute(query, params)
+            for row in self.cursor.fetchall():
+                metadata = json.loads(row[4]) if row[4] else None
+                source_nodes_data.append({
+                    "node_id": row[0], "node_type": row[1], "content_preview": row[2],
+                    "created_timestamp_iso": row[3], "metadata": metadata,
+                    "related_to_target_via": row[5] # The relationship type from the edge
+                })
+        except sqlite3.Error as e:
+            print(f"KnowledgeGraph: Error in get_source_nodes_related_to_target for target '{target_node_id}': {e}")
+        return source_nodes_data
+
     def close(self):
         """Closes the database connection."""
         if self.conn:
@@ -199,6 +277,20 @@ if __name__ == '__main__':
     # kg.cursor.execute("DELETE FROM kb_nodes WHERE node_id = ?", ("python_topic",))
     # kg.conn.commit()
     # print(f"Edges after deleting python_topic: {kg.get_edges(target_node_id='python_topic')}") # Should be empty if cascade worked
+
+    # Test get_related_nodes
+    print("\nTesting get_related_nodes:")
+    related_to_doc1 = kg.get_related_nodes("doc1", relationship_types=["HAS_TOPIC", "MENTIONS_TOPIC"], limit=2)
+    print(f"Nodes related to doc1 (HAS_TOPIC, MENTIONS_TOPIC, limit 2): {json.dumps(related_to_doc1, indent=2)}")
+
+    related_to_placeholder = kg.get_related_nodes("non_existent_source", limit=2)
+    print(f"Nodes related to non_existent_source: {json.dumps(related_to_placeholder, indent=2)}")
+
+    # Test get_source_nodes_related_to_target
+    print("\nTesting get_source_nodes_related_to_target:")
+    sources_for_python_topic = kg.get_source_nodes_related_to_target("python_topic", relationship_types=["HAS_TOPIC"], limit=2)
+    print(f"Source nodes for python_topic (HAS_TOPIC, limit 2): {json.dumps(sources_for_python_topic, indent=2)}")
+    # Expected: doc1 should be here if edge was doc1 -> python_topic (HAS_TOPIC)
 
     kg.close()
     if db_file.exists(): # Clean up after test

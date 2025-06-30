@@ -88,7 +88,26 @@
     "specialty": "Summarizes text content, often used internally by other agents like WebCrawler or for document processing tasks.",
     "active": true,
     "estimated_complexity": "medium",
-    "estimated_speed": "medium"
+    "estimated_speed": "medium",
+    "provided_services": [
+      {
+        "name": "summarize_text",
+        "description": "Summarizes a given block of text and returns the summary.",
+        "parameters": [
+          {
+            "name": "text_to_summarize",
+            "type": "string",
+            "required": true,
+            "description": "The text content that needs to be summarized."
+          }
+        ],
+        "returns": {
+          "type": "string",
+          "description": "The summarized text."
+        },
+        "handler_method_name": "_service_docsummarizer_summarize_text"
+      }
+    ]
   },
   {
     "name": "GeneralPurposeAgent",
