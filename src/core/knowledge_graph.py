@@ -6,7 +6,19 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 class KnowledgeGraph:
+    """
+    Manages a SQLite-based knowledge graph to store and retrieve relationships
+    between various entities like Knowledge Base items, topics, keywords, etc.
+    It provides methods to initialize the schema, add nodes and edges,
+    and query for related information.
+    """
     def __init__(self, db_path: Path):
+        """
+        Initializes the KnowledgeGraph instance and connects to the SQLite database.
+
+        Args:
+            db_path (Path): The file path for the SQLite database.
+        """
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False) # check_same_thread=False for potential async usage by orchestrator

@@ -15,14 +15,18 @@ Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for po
         *   Step-level validation and robust retry mechanisms.
         *   Basic parallel execution for independent tasks.
         *   Targeted plan revision based on detailed failure context.
-        *   Preliminary Knowledge Base query to inform planning.
-    *   **Contextual Agent Selection:** Orchestrator utilizes UI context and zero-shot intent classification for improved agent routing.
+        *   Utilizes an expanding Knowledge Base (semantic vector search via ChromaDB and emerging graph-based relationships via SQLite) to inform planning.
+        *   Enhanced NLU for deeper request understanding (alternative intents, implicit goals).
+        *   Considers agent complexity, speed, and request priority in planning.
+        *   Internal mechanism to suggest new tools/capabilities if a request cannot be fulfilled.
+    *   **Contextual Agent Selection:** Orchestrator utilizes UI context and enhanced NLU for improved agent routing.
     *   **Conversational Memory:** Basic conversation history is maintained and provided as context to MasterPlanner.
-*   **Persistent Knowledge Base (ChromaDB):**
-    *   Stores and retrieves textual information (document excerpts, web summaries, code explanations/generations) via semantic search.
-    *   Includes a "Knowledge Base Explorer" in the Web UI for direct user querying.
-    *   Automatically augmented by agents like DocumentProcessor (via UI), WebCrawler, and CodeMaster.
-*   **Extensible Agent Configuration:** Agent capabilities and models can be configured via `agents.json`.
+*   **Persistent Knowledge Base (Evolving):**
+    *   Primary textual information storage and semantic search via **ChromaDB**.
+    *   **Emerging SQLite-based Knowledge Graph** to store relationships between KB items, entities, and topics, further enriching context for planning.
+    *   Includes a "Knowledge Base Explorer" in the Web UI for direct user querying (currently ChromaDB).
+    *   Automatically augmented by agents like DocumentProcessor (via UI), WebCrawler, and CodeMaster. Content analysis extracts keywords and topics, populating both ChromaDB metadata and KG relationships.
+*   **Extensible Agent Configuration:** Agent capabilities, models, complexity, and speed can be configured via `agents.json`.
 *   **Model Management:** Model downloads are managed via `models.conf`.
 *   **Web UI (Streamlit):** Provides an interactive interface with various operation modes, including the new KB Explorer.
 *   **Core Capabilities:** Document processing, web intelligence, project scaffolding, system information.

@@ -44,30 +44,30 @@
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
-**Overall AGI Orchestrator Progress:** ~22-27% (V1 foundations, V1.x enhancements in MasterPlanner orchestration, Knowledge Base, Inter-Agent Message Bus, and initial User Feedback Mechanisms contribute to this).
+**Overall AGI Orchestrator Progress:** ~25-30% (V1 foundations, V1.x enhancements, plus initial KG, resource-aware planning, advanced NLU, tool suggestion, and testing framework).
 
 ### Phase X: Advanced Cognitive Orchestration
 *Key Objectives:*
 *   [X] **Enhanced `MasterPlanner` Capabilities (Evolution):** (Initial capabilities implemented, learning mechanisms enhanced)
     *   [X] Complex Plan Execution (parallel, conditional, looping/retry) - *Initial retry and parallel execution implemented.*
     *   [X] Dynamic Plan Adaptation & Learning - *Initial targeted revision context and learning from feedback reports implemented. Topic utilization from KB also enhances adaptation.*
-    *   [ ] Resource-Aware & Prioritized Planning
+    *   [P] Resource-Aware & Prioritized Planning - *Agent `estimated_speed` added; MasterPlanner prompt updated for speed, complexity, and request priority.*
 *   [X] **Sophisticated Intent Understanding & Contextual Awareness:** (Initial NLU enhancements implemented)
-    *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *Enhanced with NER for entity extraction; MasterPlanner KB pre-query leverages this for better contextual awareness.*
+    *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *Enhanced with NER, alternative intent suggestion, implicit goal extraction; MasterPlanner KB pre-query leverages this. MasterPlanner prompt updated for richer NLU.*
     *   [ ] Dedicated NLU module/agent
     *   [ ] Richer contextual model of interaction & user objectives
 
 ### Phase Y: System Learning, Memory & Adaptation
 *Key Objectives:*
-*   [X] **Persistent & Adaptive Knowledge Base:** (Core implemented, enhanced analysis)
+*   [P] **Persistent & Adaptive Knowledge Base:** (Core ChromaDB implemented, initial Graph DB started)
     *   [X] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations) - *ChromaDB backend, store/retrieve methods, UI explorer implemented. Data types include doc excerpts, web summaries, code explanations/generations, plan execution logs, feedback reports.*
     *   [X] Automated content enrichment (keyword & topic extraction) for most new KB entries.
-    *   [ ] Hybrid DB approach (vector + graph) - *Currently vector-only.*
+    *   [P] Hybrid DB approach (vector + graph) - *Initial SQLite-based graph DB (`kb_nodes`, `kb_edges`) designed and implemented. Basic population from KB events (linking items to topics/keywords, plan logs, feedback reports) added. MasterPlanner now queries this graph for related items.*
 *   [X] **Comprehensive User Feedback Loop & Reinforcement Learning:** (Feedback collection, analysis, and planner utilization implemented)
     *   [X] Explicit user feedback mechanisms (ratings, corrections) - *UI widgets for feedback integrated across relevant UI outputs.*
     *   [X] System analyzes feedback to generate summary reports, stored in KB.
     *   [X] MasterPlanner actively uses feedback reports from KB for plan adaptation.
-    *   [ ] RL frameworks for adjusting behavior, prompts, tool selection (Next step for deeper learning).
+    *   [ ] RL frameworks for adjusting behavior, prompts, tool selection - *Initial design for simple value-averaging RL based on existing logger completed. No implementation yet.*
 *   [X] **Knowledge Ingestion & Synthesis:** (Agent-driven ingestion, reactive analysis, planner utilization)
     *   [X] Autonomous ingestion from documents/links - *WebCrawler, DocumentProcessor, CodeMaster store outputs in KB.*
     *   [X] Reactive analysis of new KB content (keyword extraction, topic modeling) triggered via message bus.
@@ -76,12 +76,13 @@
 
 ### Phase Z: Expanded Autonomy & Collaborative Intelligence
 *Key Objectives:*
-*   [ ] **Advanced Tool Discovery & Augmentation:**
+*   [P] **Advanced Tool Discovery & Augmentation:**
     *   [ ] Dynamically discover, evaluate, learn new tools/APIs
-    *   [ ] Agents request/suggest new tool integrations
-*   [X] **Sophisticated Inter-Agent Communication & Collaboration:** (Initial foundation laid & first use case)
+    *   [P] Agents request/suggest new tool integrations - *MasterPlanner can now suggest new tools via a `SystemCapabilityManager` step; suggestions are logged to `logs/tool_suggestions.log`.*
+*   [X] **Sophisticated Inter-Agent Communication & Collaboration:** (Initial foundation laid & first use case verified)
     *   [X] Basic asynchronous message bus implemented, enabling event broadcasting and subscription by agents/components.
         *   *Initial use case: KB event triggers `ContentAnalysisAgent` for keyword extraction from new KB entries.*
+        *   *Verified `agent_service_call` for task delegation (e.g., `DocSummarizer.summarize_text` service).*
     *   [ ] Advanced protocols for negotiation, complex info sharing, coordination
     *   [ ] Multi-agent consensus, task delegation, shared goal understanding
 *   [ ] **Proactive & Goal-Oriented Assistance:**
@@ -126,5 +127,5 @@
 *   [ ] Ethical Alignment & User Control
 *   [ ] Performance Optimization & Efficiency
 *   [ ] Dependency Management & Upgradability
-*   [ ] Comprehensive Testing & Validation
+*   [P] Comprehensive Testing & Validation - *Test framework setup with Pytest. Unit tests implemented for `KnowledgeGraph` class and core `TerminusOrchestrator` logic (`classify_user_intent`, `_evaluate_plan_condition`).*
 *   [ ] Documentation & Community

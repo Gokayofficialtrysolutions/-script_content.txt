@@ -1092,8 +1092,26 @@ class TerminusOrchestrator:
 
    async def _service_docsummarizer_summarize_text(self, params: Dict, service_definition: AgentServiceDefinition) -> Dict:
         """
-        Service handler for DocSummarizer to summarize text.
-        Invokes the DocSummarizer agent (LLM) to perform the summarization.
+        Handles a service call to the DocSummarizer agent to summarize a given text.
+
+        This method is invoked when a plan step specifies an `agent_service_call`
+        targeting the 'DocSummarizer' agent and its 'summarize_text' service.
+        It constructs a prompt for the DocSummarizer's underlying LLM, executes the
+        agent, and handles the asynchronous response to return a structured
+        service result containing the summary.
+
+        Args:
+            params (Dict): A dictionary containing the parameters for the service call.
+                           Expected to have 'text_to_summarize'.
+            service_definition (AgentServiceDefinition): The definition of the
+                                                       'summarize_text' service.
+
+        Returns:
+            Dict: A structured dictionary indicating the outcome of the service call.
+                  If successful and asynchronous, status will be 'pending_async' with a 'task_id'.
+                  If completed synchronously (less likely for LLM), status 'success' with 'data'
+                  containing the summary.
+                  On error, status 'error' with an error message.
         """
         log_prefix = f"[{self.__class__.__name__}._service_docsummarizer_summarize_text]"
         text_to_summarize = params.get("text_to_summarize")
