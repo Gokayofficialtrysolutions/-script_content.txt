@@ -1706,7 +1706,10 @@ class TerminusOrchestrator:
            # --- RL-based Planner Strategy Selection ---
            available_planner_strategies = ["Strategy_Default", "Strategy_FocusClarity", "Strategy_PrioritizeBrevity"] # Example strategies
            selected_strategy = "Strategy_Default" # Default
-           if self.rl_policy_manager:
+           # Ensure planner_agent is resolved before accessing its model, or handle if it's None
+           planner_agent = next((a for a in self.agents if a.name == "MasterPlanner" and a.active), None) # Resolve planner_agent here
+
+           if self.rl_policy_manager and planner_agent: # Check planner_agent too
                state_key_for_rl = self.rl_policy_manager._construct_state_key(current_rl_state)
                chosen_action = self.rl_policy_manager.get_best_action(state_key_for_rl, available_planner_strategies)
                if chosen_action:
@@ -1714,11 +1717,16 @@ class TerminusOrchestrator:
                    print(f"[{plan_handler_id}] RLPolicyManager selected strategy: {selected_strategy} for state: {state_key_for_rl}")
                else:
                    print(f"[{plan_handler_id}] RLPolicyManager returned no specific strategy, using default: {selected_strategy}")
-           else:
+           elif not planner_agent:
+                print(f"[{plan_handler_id}] MasterPlanner agent not found, cannot determine LLM model for RL details. Using default strategy.")
+           else: # RL Policy Manager not available
                print(f"[{plan_handler_id}] RLPolicyManager not available, using default strategy: {selected_strategy}")
 
            current_rl_action = selected_strategy # This is what gets logged as 'action_taken'
-           current_prompt_details = {"strategy_used": selected_strategy, "llm_model": planner_agent.model if planner_agent else "Unknown"} # Log the chosen strategy
+           current_prompt_details = {
+               "strategy_used": selected_strategy,
+               "llm_model": planner_agent.model if planner_agent else "MasterPlanner_Agent_Not_Found" # Handle planner_agent being None
+            }
            # Note: For this iteration, all strategies still use the same construct_main_planning_prompt.
            # Future work: construct_main_planning_prompt could take selected_strategy and vary prompt content.
 
@@ -1728,7 +1736,8 @@ class TerminusOrchestrator:
                 prompt_details_for_executed_plan_log = current_prompt_details
 
            if current_attempt == 0:
-               planning_prompt = prompt_constructors.construct_main_planning_prompt( # This call remains the same for now
+               # The actual planning prompt construction happens here
+               planning_prompt = prompt_constructors.construct_main_planning_prompt(
                    user_prompt=user_prompt,
                    history_context=history_context_string,
                    nlu_summary=nlu_summary_for_prompt,

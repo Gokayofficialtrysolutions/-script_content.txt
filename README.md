@@ -21,6 +21,7 @@ Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for po
         *   Enhanced NLU for deeper request understanding (alternative intents, implicit goals).
         *   Considers agent complexity, speed, and request priority in planning.
         *   Internal mechanism to suggest new tools/capabilities if a request cannot be fulfilled.
+        *   Adaptive planning strategy selection (experimental) using Reinforcement Learning to improve effectiveness over time.
     *   **Contextual Agent Selection:** Orchestrator utilizes UI context and enhanced NLU for improved agent routing.
     *   **Conversational Memory:** Basic conversation history is maintained and provided as context to MasterPlanner.
 *   **Persistent Knowledge Base (Evolving):**

@@ -44,7 +44,7 @@
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
-**Overall AGI Orchestrator Progress:** ~30-35% (Reflects implementation of RL policy manager structure and log processing, plus more tests).
+**Overall AGI Orchestrator Progress:** ~32-37% (Reflects activation of RL-based planner strategy selection and its tests).
 
 ### Phase X: Advanced Cognitive Orchestration
 *Key Objectives:*
@@ -67,7 +67,7 @@
     *   [X] Explicit user feedback mechanisms (ratings, corrections) - *UI widgets for feedback integrated across relevant UI outputs.*
     *   [X] System analyzes feedback to generate summary reports, stored in KB.
     *   [X] MasterPlanner actively uses feedback reports from KB for plan adaptation.
-    *   [P] RL frameworks for adjusting behavior, prompts, tool selection - *`RLPolicyManager` class created with methods to load/save policies, update preferences (value averaging), and select actions (epsilon-greedy). Implemented `process_experience_log` to learn from `RLExperienceLogger`'s output. Next step: integrate `get_best_action` into orchestrator decision points.*
+    *   [P] RL frameworks for adjusting behavior, prompts, tool selection - *`RLPolicyManager` class implemented (load/save, update preferences, epsilon-greedy action selection, process_experience_log). Integrated with MasterPlanner for dynamic selection of conceptual planner strategies; chosen strategy is logged for learning loop.*
 *   [X] **Knowledge Ingestion & Synthesis:** (Agent-driven ingestion, reactive analysis, planner utilization)
     *   [X] Autonomous ingestion from documents/links - *WebCrawler, DocumentProcessor, CodeMaster store outputs in KB.*
     *   [X] Reactive analysis of new KB content (keyword extraction, topic modeling) triggered via message bus.
@@ -127,5 +127,5 @@
 *   [ ] Ethical Alignment & User Control
 *   [ ] Performance Optimization & Efficiency
 *   [ ] Dependency Management & Upgradability
-*   [P] Comprehensive Testing & Validation - *Test framework setup with Pytest. Unit tests implemented for `KnowledgeGraph`, core `TerminusOrchestrator` logic (`classify_user_intent`, `_evaluate_plan_condition`), ChromaDB interactions (`store_knowledge`, `retrieve_knowledge`), Event Bus/core handlers (`_event_handler_kb_content_added`), comprehensive `execute_master_plan` scenarios (failures, retries, revisions, async steps), and `RLPolicyManager`'s log processing.*
+*   [P] Comprehensive Testing & Validation - *Test framework setup with Pytest. Extensive unit tests for: KnowledgeGraph, core TerminusOrchestrator (classify_user_intent, _evaluate_plan_condition, ChromaDB interactions, Event Bus/handlers), execute_master_plan (failures, retries, revisions, async steps), RLPolicyManager (log processing), and RL integration in execute_master_plan (dynamic strategy selection logging).*
 *   [ ] Documentation & Community
