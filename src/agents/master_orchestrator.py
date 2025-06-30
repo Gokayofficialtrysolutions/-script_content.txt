@@ -1704,39 +1704,52 @@ class TerminusOrchestrator:
            current_rl_state = self._construct_rl_state(user_prompt, first_attempt_nlu_output, current_rl_state_kb_summary, None)
 
            # --- RL-based Planner Strategy Selection ---
-           available_planner_strategies = ["Strategy_Default", "Strategy_FocusClarity", "Strategy_PrioritizeBrevity"] # Example strategies
-           selected_strategy = "Strategy_Default" # Default
-           # Ensure planner_agent is resolved before accessing its model, or handle if it's None
-           planner_agent = next((a for a in self.agents if a.name == "MasterPlanner" and a.active), None) # Resolve planner_agent here
+           # Define available conceptual strategies for the MasterPlanner's prompting approach.
+           available_planner_strategies = ["Strategy_Default", "Strategy_FocusClarity", "Strategy_PrioritizeBrevity"]
+           selected_strategy = "Strategy_Default" # Default strategy if RL cannot choose.
 
-           if self.rl_policy_manager and planner_agent: # Check planner_agent too
+           # Ensure planner_agent is resolved to get its model details for logging, if available.
+           planner_agent = next((a for a in self.agents if a.name == "MasterPlanner" and a.active), None)
+
+           if self.rl_policy_manager and planner_agent:
+               # Construct the state key from the current RL state dictionary.
                state_key_for_rl = self.rl_policy_manager._construct_state_key(current_rl_state)
+               # Ask the RL policy manager for the best known action (strategy) for this state.
                chosen_action = self.rl_policy_manager.get_best_action(state_key_for_rl, available_planner_strategies)
+
                if chosen_action:
                    selected_strategy = chosen_action
                    print(f"[{plan_handler_id}] RLPolicyManager selected strategy: {selected_strategy} for state: {state_key_for_rl}")
                else:
-                   print(f"[{plan_handler_id}] RLPolicyManager returned no specific strategy, using default: {selected_strategy}")
+                   # No specific preference from RL manager, or exploration led to random choice (handled in get_best_action).
+                   # If get_best_action returned None (e.g. no actions available), selected_strategy remains default.
+                   print(f"[{plan_handler_id}] RLPolicyManager provided no overriding strategy or chose default for state: {state_key_for_rl}. Using: {selected_strategy}")
            elif not planner_agent:
-                print(f"[{plan_handler_id}] MasterPlanner agent not found, cannot determine LLM model for RL details. Using default strategy.")
-           else: # RL Policy Manager not available
-               print(f"[{plan_handler_id}] RLPolicyManager not available, using default strategy: {selected_strategy}")
+                print(f"[{plan_handler_id}] MasterPlanner agent not found. Using default strategy: {selected_strategy}.")
+           else: # RL Policy Manager not available (e.g., failed to initialize)
+               print(f"[{plan_handler_id}] RLPolicyManager not available. Using default strategy: {selected_strategy}.")
 
-           current_rl_action = selected_strategy # This is what gets logged as 'action_taken'
+           # This 'selected_strategy' will be logged as the 'action_taken' for this RL experience.
+           current_rl_action = selected_strategy
+           # Log details about the prompt generation context, including the chosen strategy.
            current_prompt_details = {
                "strategy_used": selected_strategy,
-               "llm_model": planner_agent.model if planner_agent else "MasterPlanner_Agent_Not_Found" # Handle planner_agent being None
+               "llm_model": planner_agent.model if planner_agent else "MasterPlanner_Agent_Not_Found"
             }
-           # Note: For this iteration, all strategies still use the same construct_main_planning_prompt.
-           # Future work: construct_main_planning_prompt could take selected_strategy and vary prompt content.
+           # NOTE: For this initial RL integration, the actual content of 'planning_prompt' below
+           # does NOT yet change based on 'selected_strategy'. The learning loop works by associating
+           # the *name* of the strategy (logged in 'action_taken') with the eventual reward.
+           # Future enhancements would involve `construct_main_planning_prompt` generating
+           # different prompt structures based on the value of `selected_strategy`.
 
-           if state_for_executed_plan_log is None : # This logs details of the first planning attempt
+           if state_for_executed_plan_log is None : # This captures details of the first planning attempt for logging.
                 state_for_executed_plan_log = current_rl_state
                 action_for_executed_plan_log = current_rl_action
                 prompt_details_for_executed_plan_log = current_prompt_details
 
            if current_attempt == 0:
-               # The actual planning prompt construction happens here
+               # The actual planning prompt construction happens here.
+               # For now, it doesn't use selected_strategy to change content, but it's logged.
                planning_prompt = prompt_constructors.construct_main_planning_prompt(
                    user_prompt=user_prompt,
                    history_context=history_context_string,
