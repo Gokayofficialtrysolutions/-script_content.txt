@@ -165,6 +165,107 @@ class RLPolicyManager:
         """Returns all action preferences for a given state."""
         return dict(self.action_preferences.get(state_key, {}))
 
+    def _construct_state_key(self, state_dict: Dict[str, Any]) -> str:
+        """
+        Constructs a consistent string key from a state dictionary.
+        Sorts by key and joins key-value pairs.
+        Example: {"intent": "A", "entities": 2} -> "entities:2;intent:A"
+        """
+        if not state_dict or not isinstance(state_dict, dict):
+            return "default_state_key_if_empty_or_invalid"
+
+        # Filter out complex objects or normalize them if necessary.
+        # For now, assuming state_dict contains simple, sortable values.
+        # Consider filtering for specific known keys that define the state space.
+        relevant_state_keys = sorted([
+            "nlu_intent", "nlu_entities_count", "user_prompt_length_category",
+            "kb_general_hits", "kg_derived_hits_count", "past_plan_summary_hits_count",
+            "kb_plan_log_hits", "kb_feedback_hits", "previous_cycle_outcome"
+        ])
+
+        parts = []
+        for key in relevant_state_keys:
+            if key in state_dict:
+                value = state_dict[key]
+                # Normalize value to string, handle None
+                value_str = str(value) if value is not None else "None"
+                parts.append(f"{key}:{value_str}")
+
+        if not parts: # If no relevant keys found, use a generic key or hash of full dict
+            # Fallback to hashing the whole dict if no relevant keys are present
+            # return "state_fallback_" + str(hash(tuple(sorted(state_dict.items()))))
+             return "default_state_key_if_no_relevant_fields"
+
+
+        return ";".join(parts)
+
+    def process_experience_log(self, log_file_path: Path, learning_rate: Optional[float] = None) -> int:
+        """
+        Processes an RL experience log file, updating action preferences.
+
+        Args:
+            log_file_path (Path): Path to the .jsonl experience log file.
+            learning_rate (Optional[float]): If provided, this learning rate will be used for all updates
+                                             from this log processing session, overriding the default
+                                             or the incremental mean calculation in update_action_preference.
+
+        Returns:
+            int: The number of log entries successfully processed.
+        """
+        if not log_file_path.exists():
+            print(f"RLPolicyManager: Experience log file not found at {log_file_path}. No policy updates.")
+            return 0
+
+        processed_count = 0
+        updated_state_action_pairs = set()
+
+        try:
+            with open(log_file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    try:
+                        log_entry = json.loads(line.strip())
+
+                        state_dict = log_entry.get("state")
+                        action_key = log_entry.get("action_taken") # Renamed from 'action' in logger for clarity
+                        reward = log_entry.get("calculated_reward")
+
+                        if state_dict is None or action_key is None or reward is None:
+                            print(f"RLPolicyManager: Warning - Skipping log entry at line {line_num} due to missing state, action, or reward.")
+                            continue
+
+                        if not isinstance(state_dict, dict):
+                            print(f"RLPolicyManager: Warning - Skipping log entry at line {line_num}, 'state' is not a dictionary.")
+                            continue
+                        if not isinstance(action_key, str):
+                             print(f"RLPolicyManager: Warning - Skipping log entry at line {line_num}, 'action_taken' is not a string.")
+                             continue
+                        if not isinstance(reward, (int, float)):
+                            print(f"RLPolicyManager: Warning - Skipping log entry at line {line_num}, 'calculated_reward' is not a number.")
+                            continue
+
+                        state_key = self._construct_state_key(state_dict)
+
+                        self.update_action_preference(state_key, action_key, float(reward), learning_rate=learning_rate)
+                        updated_state_action_pairs.add((state_key, action_key))
+                        processed_count += 1
+
+                    except json.JSONDecodeError:
+                        print(f"RLPolicyManager: Warning - Skipping malformed JSON log entry at line {line_num}.")
+                    except Exception as e_inner:
+                        print(f"RLPolicyManager: Warning - Error processing log entry at line {line_num}: {e_inner}")
+
+            if processed_count > 0:
+                self.save_policy()
+                print(f"RLPolicyManager: Processed {processed_count} entries from {log_file_path}. Updated {len(updated_state_action_pairs)} unique state-action pairs. Policy saved.")
+            else:
+                print(f"RLPolicyManager: No valid entries processed from {log_file_path}. Policy not saved.")
+
+            return processed_count
+
+        except IOError as e:
+            print(f"RLPolicyManager: Error reading experience log file {log_file_path}: {e}")
+            return 0
+
 
 if __name__ == '__main__':
     # Example Usage
