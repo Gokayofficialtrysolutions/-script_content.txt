@@ -17,9 +17,9 @@ def construct_kb_query_generation_prompt(user_prompt:str, history_context_string
    """
    return ( f"Conversation History:\n{history_context_string}\n\n" # Use the passed string
             f"Current User Request: '{user_prompt}'\n"
-            f"NLU Analysis of Request: {nlu_info}\n\n"
+            f"NLU Analysis of Request (Primary Intent, Entities, Implicit Goals, Alternatives):\n{nlu_info}\n\n" # Enhanced nlu_info
             f"Your task: Based on request, history, and NLU, generate a concise search query (max 5-7 words) for a knowledge base (KB) containing general info (docs, web content, code explanations). "
-            f"**Strongly consider NLU entities for a targeted query.** "
+            f"**Strongly consider NLU entities and implicit goals for a targeted query.** " # Added implicit goals
             f"If no KB query seems useful, output ONLY: NO_QUERY_NEEDED\n"
             f"Otherwise, output ONLY the query string.\nSearch Query or Marker:" )
 
@@ -80,18 +80,24 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
 
    context_usage_instructions = (
        "When creating the plan, consider the following:\n"
-       "1. The 'NLU Analysis' provides key entities and the primary intent of the user's CURRENT request.\n"
+       "1. The 'NLU Analysis' provides the primary intent, confidence score, any alternative intents, extracted entities, and potentially implicit user goals for the CURRENT request. Use all these NLU facets to deeply understand the user's needs.\n"
        "2. 'General Context from Knowledge Base', 'Insights from Past Plan Executions', and 'Feedback Insights' offer background. Learn from past successes, failures, and user feedback.\n"
        "3. If 'Extracted Keywords' or 'Extracted Topics' are listed with any KB items, these can help refine task prompts or agent choices.\n"
-       "4. Agent 'Complexity' ratings (low, medium, high) should guide agent selection: favor lower complexity for simple tasks, and consider breaking down tasks requiring high complexity agents.\n"
-       "5. If an overall 'Request Priority' (e.g., high, normal, low) is specified for the user's request, consider this in your planning. High priority tasks might prefer more direct or faster plans, while low priority tasks can afford more thoroughness if it doesn't block others. You may also assign a 'priority' field ('high', 'normal', 'low') to individual steps in your generated plan if you discern differential importance among sub-tasks based on the overall request priority.\n"
+       "4. Agent 'Complexity' (low, medium, high) and 'Speed' (fast, medium, slow) ratings should guide agent selection. \n"
+       "   - For simple tasks, favor agents with low complexity.\n"
+       "   - For complex tasks, you might need high complexity agents; consider if the task can be broken down, especially if NLU indicates multiple intents or complex implicit goals.\n"
+       "5. The overall 'Request Priority' (e.g., high, normal, low - assume 'normal' if not specified) should influence your choices:\n"
+       "   - For 'high' priority requests, aim for quicker plans. This might mean choosing agents with 'fast' or 'medium' speed. Address the primary intent and key implicit goals directly.\n"
+       "   - For 'low' priority requests, you can afford more thoroughness. Agents with 'slow' speed or higher 'complexity' can be used. Consider exploring alternative intents if NLU suggests them.\n"
+       "   - For 'normal' priority, balance speed, complexity, and result quality. Address primary intent and important implicit goals; consider alternatives if primary confidence is low.\n"
+       "6. You may also assign a 'priority' field ('high', 'normal', 'low') to individual steps in your generated plan if you discern differential importance among sub-tasks based on the overall request priority or dependencies.\n"
    )
 
    return (f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for specialized AI agents.\n\n"
            f"{history_context}"
            f"--- KNOWLEDGE BASE & NLU CONTEXT ---\n"
            f"Current User Request: '{user_prompt}'\n"
-           f"NLU Analysis of Current Request: {nlu_info}\n\n"
+           f"NLU Analysis of Current Request (Intent, Entities, Implicit Goals, Alternatives):\n{nlu_info}\n\n" # Enhanced nlu_info usage
            f"{kb_section if kb_section.strip() else 'No specific information retrieved from Knowledge Base for this request.'}\n"
            f"{context_usage_instructions}\n"
            f"--- AVAILABLE AGENTS & TASK ---\n"
@@ -134,9 +140,9 @@ def construct_revision_planning_prompt(user_prompt:str, history_context:str, nlu
    return (f"You are MasterPlanner. A previous plan attempt failed. Analyze failure and provide revised JSON plan.\n\n"
            f"{history_context}"
            f"Original User Request: '{user_prompt}' (Consider its original priority if specified in context).\n"
-           f"NLU Analysis (from first attempt): {nlu_info}\n\n"
+           f"NLU Analysis (from first attempt - Intent, Entities, Implicit Goals, Alternatives):\n{nlu_info}\n\n" # Enhanced nlu_info usage
            f"{failure_context_section}"
-           f"Available Agents (Note Complexity Ratings):\n{agent_desc}\n\n"
+           f"Available Agents (Note Complexity & Speed Ratings):\n{agent_desc}\n\n" # Added Speed
            f"Revision Instructions:\n1. Analyze 'DETAILED FAILURE CONTEXT'.\n"
            f"2. Goal: revised JSON plan. Make MINIMAL TARGETED changes to 'Plan that Failed This Attempt'.\n"
            f"3. Prioritize fixing/replacing failed step. Adjust subsequent steps if dependencies change.\n"

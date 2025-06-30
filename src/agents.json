@@ -4,35 +4,40 @@
     "model": "ollama/mixtral:8x22b",
     "specialty": "Complex task decomposition, planning, and orchestration. Uses NLU, KB context (including topics & feedback), and conversation history to generate multi-step execution plans for other agents.",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "slow"
   },
   {
     "name": "ContentAnalysisAgent",
     "model": "ollama/llama3.1:70b",
     "specialty": "Analyzes text content from the Knowledge Base to extract keywords and topics. Expects content and returns a JSON with 'keywords' and 'topics'. Can also perform deeper analysis to enrich knowledge base entries.",
     "active": true,
-    "estimated_complexity": "medium"
+    "estimated_complexity": "medium",
+    "estimated_speed": "medium"
   },
   {
     "name": "SystemAdmin",
     "model": "ollama/codellama:34b",
     "specialty": "Provides system information (OS, CPU, memory, disk, network, top processes). Accepts descriptive prompts like 'get os info', 'top 5 processes'.",
     "active": true,
-    "estimated_complexity": "low"
+    "estimated_complexity": "low",
+    "estimated_speed": "fast"
   },
   {
     "name": "ImageForge",
     "model": "stabilityai/stable-diffusion-xl-base-1.0",
     "specialty": "Generates images from text prompts using diffusion models. Manages image saving.",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "slow"
   },
   {
     "name": "WebCrawler",
     "model": "ollama/dolphin-mixtral:8x7b",
     "specialty": "Scrapes web page content given a URL, optionally summarizes it, and stores results in the Knowledge Base. Also supports general web search queries via external tools (details managed by orchestrator). Handles web research and intelligence.",
     "active": true,
-    "estimated_complexity": "medium"
+    "estimated_complexity": "medium",
+    "estimated_speed": "medium"
   },
   {
     "name": "CodeMaster",
@@ -40,6 +45,7 @@
     "specialty": "Handles code-related tasks: explaining code snippets, generating new code modules/classes, and experimental AI-assisted code modification in projects. Stores outputs in KB. Specialized in Programming & Development.",
     "active": true,
     "estimated_complexity": "high",
+    "estimated_speed": "medium",
     "provided_services": [
       {
         "name": "validate_code_syntax",
@@ -73,90 +79,103 @@
     "model": "ollama/mistral",
     "specialty": "Processes audio files: retrieves information, converts formats, and performs text-to-speech (TTS).",
     "active": true,
-    "estimated_complexity": "low"
+    "estimated_complexity": "low",
+    "estimated_speed": "fast"
   },
   {
     "name": "DocSummarizer",
     "model": "ollama/mistral",
     "specialty": "Summarizes text content, often used internally by other agents like WebCrawler or for document processing tasks.",
     "active": true,
-    "estimated_complexity": "medium"
+    "estimated_complexity": "medium",
+    "estimated_speed": "medium"
   },
   {
     "name": "GeneralPurposeAgent",
     "model": "ollama/mistral",
     "specialty": "A general-purpose agent for tasks not covered by specialized agents, such as simple Q&A or text generation.",
     "active": true,
-    "estimated_complexity": "low"
+    "estimated_complexity": "low",
+    "estimated_speed": "fast"
   },
   {
     "name": "NLUAnalysisAgent",
     "model": "ollama/mistral",
     "specialty": "Natural Language Understanding: Performs intent classification against a provided list of candidate intents, and extracts named entities from a given text. Returns results in a structured JSON format.",
     "active": true,
-    "estimated_complexity": "medium"
+    "estimated_complexity": "medium",
+    "estimated_speed": "fast"
   },
   {
     "name": "DeepThink",
     "model": "ollama/deepseek-r1:32b",
     "specialty": "Advanced Reasoning & Logic",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "slow"
   },
   {
     "name": "DataWizard",
     "model": "ollama/qwen2.5:72b",
     "specialty": "Data Analysis & Processing",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "slow"
   },
   {
     "name": "DocProcessor",
     "model": "ollama/llama3.1:70b",
     "specialty": "Document Analysis & Generation (potentially more comprehensive than summarization)",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "slow"
   },
   {
     "name": "VisionAI",
     "model": "ollama/llava:34b",
     "specialty": "Image & Visual Processing (distinct from ImageForge which is generation-focused)",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "medium"
   },
   {
     "name": "MathGenius",
     "model": "ollama/deepseek-math:7b",
     "specialty": "Mathematical Computations",
     "active": true,
-    "estimated_complexity": "medium"
+    "estimated_complexity": "medium",
+    "estimated_speed": "medium"
   },
   {
     "name": "CreativeWriter",
     "model": "ollama/nous-hermes2:34b",
     "specialty": "Creative Content Generation",
     "active": true,
-    "estimated_complexity": "medium"
+    "estimated_complexity": "medium",
+    "estimated_speed": "medium"
   },
   {
     "name": "SecurityExpert",
     "model": "ollama/mixtral:8x22b",
     "specialty": "Cybersecurity Analysis",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "slow"
   },
   {
     "name": "ResearchBot",
     "model": "ollama/yi:34b",
     "specialty": "Scientific Research",
     "active": true,
-    "estimated_complexity": "high"
+    "estimated_complexity": "high",
+    "estimated_speed": "slow"
   },
   {
     "name": "MultiLang",
     "model": "ollama/qwen2.5-coder:32b",
     "specialty": "Multilingual Processing",
     "active": true,
-    "estimated_complexity": "medium"
+    "estimated_complexity": "medium",
+    "estimated_speed": "medium"
   }
 ]

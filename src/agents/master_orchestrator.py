@@ -77,6 +77,7 @@ class Agent:
    specialty:str
    active:bool=True
    estimated_complexity:Optional[str]=None
+   estimated_speed:Optional[str]=None # Added estimated_speed
    # `provided_services` is read from JSON but not stored on the Agent object itself.
    # It's processed by the orchestrator into self.service_definitions.
 
@@ -552,7 +553,8 @@ class TerminusOrchestrator:
        for a in self.agents:
            if a.active:
                complexity_info = f" (Complexity: {a.estimated_complexity})" if a.estimated_complexity else ""
-               descriptions.append(f"- {a.name}: Specializes in '{a.specialty}'. Uses model: {a.model}.{complexity_info}")
+               speed_info = f" (Speed: {a.estimated_speed})" if a.estimated_speed else ""
+               descriptions.append(f"- {a.name}: Specializes in '{a.specialty}'. Uses model: {a.model}.{complexity_info}{speed_info}")
        return "\n".join(descriptions) if descriptions else "No active agents available."
 
     async def _handle_system_event(self, event: SystemEvent): # Signature changed to SystemEvent
@@ -2089,10 +2091,21 @@ class TerminusOrchestrator:
 
    async def classify_user_intent(self, user_prompt: str) -> Dict: # This method calls execute_agent
         nlu_agent = next((a for a in self.agents if a.name == "NLUAnalysisAgent" and a.active), None)
-        if not nlu_agent: return {"status": "error", "message": "NLUAnalysisAgent not found or inactive.", "intent": None, "entities": []}
+        if not nlu_agent: return {"status": "error", "message": "NLUAnalysisAgent not found or inactive.", "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
         candidate_labels_str = ", ".join([f"'{label}'" for label in self.candidate_intent_labels])
-        nlu_prompt = (f"Analyze the following user prompt: '{user_prompt}'\n\n1. Intent Classification: Classify the primary intent of the prompt against the following candidate labels: [{candidate_labels_str}]. Provide the top intent and its confidence score.\n2. Named Entity Recognition: Extract relevant named entities (like names, locations, dates, organizations, products, specific terms like filenames or URLs).\n\nReturn your analysis as a single, minified JSON object with the following exact structure:\n{{\"intent\": \"<detected_intent_label>\", \"intent_score\": <float_score_0_to_1>, \"entities\": [{{ \"text\": \"<entity_text>\", \"type\": \"<ENTITY_TYPE_UPPERCASE>\", \"score\": <float_score_0_to_1>}}]}}\nIf no entities are found, return an empty list for \"entities\". If intent is unclear, use an appropriate label or 'unknown_intent'. Ensure scores are floats.")
-
+        nlu_prompt = (
+            f"Analyze the following user prompt: '{user_prompt}'\n\n"
+            f"1. Intent Classification: Classify the primary intent against candidate labels: [{candidate_labels_str}]. Provide the top intent and its confidence score (0.0-1.0).\n"
+            f"2. Alternative Intents: If confidence for primary intent is below 0.85 OR the request seems ambiguous/multi-faceted, list up to 2 alternative intents with their scores.\n"
+            f"3. Named Entity Recognition: Extract relevant named entities (names, locations, dates, organizations, products, filenames, URLs, specific technical terms).\n"
+            f"4. Implicit Goals/Desired Outcomes: Briefly describe any underlying goals or desired outcomes the user might have, even if not explicitly stated (e.g., 'User wants to solve a problem quickly', 'User is exploring options for a project'). If none, state 'None'.\n\n"
+            f"Return your analysis as a single, minified JSON object with this exact structure:\n"
+            f"{{\"intent\": \"<detected_intent_label>\", \"intent_score\": <float_score_0_to_1>, "
+            f"\"alternative_intents\": [{{ \"intent\": \"<alt_intent_label>\", \"score\": <float_score_0_to_1> }}], " # List of objects
+            f"\"entities\": [{{ \"text\": \"<entity_text>\", \"type\": \"<ENTITY_TYPE_UPPERCASE>\", \"score\": <float_score_0_to_1> }}], "
+            f"\"implicit_goals\": \"<text_description_or_None>\"}}\n"
+            f"Ensure scores are floats. If no alternatives/entities, use empty lists. If primary intent is unclear, use 'unknown_intent'."
+        )
         raw_nlu_result_or_task = await self.execute_agent(nlu_agent, nlu_prompt)
 
         raw_nlu_result: Dict
@@ -2119,20 +2132,39 @@ class TerminusOrchestrator:
             raw_nlu_result = raw_nlu_result_or_task
 
         if raw_nlu_result.get("status") != "success":
-            return {"status": "error", "message": f"NLUAnalysisAgent call failed: {raw_nlu_result.get('response')}", "intent": None, "entities": []}
+            return {"status": "error", "message": f"NLUAnalysisAgent call failed: {raw_nlu_result.get('response')}", "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
 
         try:
             parsed_response = json.loads(raw_nlu_result.get("response", "{}"))
             intent = parsed_response.get("intent", "unknown_intent")
             intent_score = parsed_response.get("intent_score", 0.0)
             entities = parsed_response.get("entities", [])
-            if not isinstance(entities, list): entities = [] # Ensure entities is a list
+            if not isinstance(entities, list): entities = []
+            alternative_intents = parsed_response.get("alternative_intents", [])
+            if not isinstance(alternative_intents, list): alternative_intents = []
+            implicit_goals = parsed_response.get("implicit_goals")
+            if isinstance(implicit_goals, str) and implicit_goals.lower() == 'none': implicit_goals = None
+
             intent_scores = {intent: intent_score} if intent != "unknown_intent" else {}
-            return {"status": "success", "intent": intent, "intent_scores": intent_scores, "entities": entities, "message": "NLU analysis via agent successful."}
+            # Add alternative intent scores to the main scores dict if needed, or keep separate
+            for alt_intent_obj in alternative_intents:
+                if isinstance(alt_intent_obj, dict) and "intent" in alt_intent_obj and "score" in alt_intent_obj:
+                    intent_scores[alt_intent_obj["intent"]] = intent_scores.get(alt_intent_obj["intent"], 0.0) + alt_intent_obj["score"] # Could sum or take max
+
+            return {
+                "status": "success",
+                "intent": intent,
+                "intent_score": intent_score, # Primary intent score
+                "intent_scores": intent_scores, # Combined scores (optional, or just use primary + alternatives separately)
+                "alternative_intents": alternative_intents,
+                "entities": entities,
+                "implicit_goals": implicit_goals,
+                "message": "NLU analysis via agent successful."
+            }
         except json.JSONDecodeError:
-            return {"status": "error", "message": "NLUAnalysisAgent returned invalid JSON.", "raw_response": raw_nlu_result.get("response"), "intent": None, "entities": []}
+            return {"status": "error", "message": "NLUAnalysisAgent returned invalid JSON.", "raw_response": raw_nlu_result.get("response"), "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
         except Exception as e:
-            return {"status": "error", "message": f"Error processing NLU agent response: {str(e)}", "intent": None, "entities": []}
+            return {"status": "error", "message": f"Error processing NLU agent response: {str(e)}", "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
 
    async def extract_document_content(self, uploaded_file_object: Any, original_filename: str) -> Dict[str, Any]:
         content_text = ""; status = "error"; message = "File type not supported or error during processing."; file_ext = Path(original_filename).suffix.lower().strip('.')
