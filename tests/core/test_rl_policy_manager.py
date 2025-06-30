@@ -1,3 +1,7 @@
+"""
+Unit tests for the RLPolicyManager class, focusing on its ability to
+construct state keys and process experience log files to update action preferences.
+"""
 import pytest
 from unittest.mock import MagicMock, patch
 import json
