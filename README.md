@@ -15,7 +15,9 @@ Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for po
         *   Step-level validation and robust retry mechanisms.
         *   Basic parallel execution for independent tasks.
         *   Targeted plan revision based on detailed failure context.
-        *   Utilizes an expanding Knowledge Base (semantic vector search via ChromaDB and emerging graph-based relationships via SQLite) to inform planning.
+        *   Utilizes an expanding Knowledge Base to inform planning:
+            *   Semantic vector search (ChromaDB) for general contextual documents.
+            *   Knowledge Graph (SQLite) for relationships between KB items, entities, topics, and for retrieving summaries of past relevant plans.
         *   Enhanced NLU for deeper request understanding (alternative intents, implicit goals).
         *   Considers agent complexity, speed, and request priority in planning.
         *   Internal mechanism to suggest new tools/capabilities if a request cannot be fulfilled.
@@ -23,9 +25,9 @@ Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for po
     *   **Conversational Memory:** Basic conversation history is maintained and provided as context to MasterPlanner.
 *   **Persistent Knowledge Base (Evolving):**
     *   Primary textual information storage and semantic search via **ChromaDB**.
-    *   **Emerging SQLite-based Knowledge Graph** to store relationships between KB items, entities, and topics, further enriching context for planning.
+    *   **SQLite-based Knowledge Graph** stores relationships between KB items, entities, topics, and simplified summaries of past executed plans. This graph enriches context for planning and enables learning from past actions.
     *   Includes a "Knowledge Base Explorer" in the Web UI for direct user querying (currently ChromaDB).
-    *   Automatically augmented by agents like DocumentProcessor (via UI), WebCrawler, and CodeMaster. Content analysis extracts keywords and topics, populating both ChromaDB metadata and KG relationships.
+    *   Automatically augmented by agents like DocumentProcessor (via UI), WebCrawler, and CodeMaster. Content analysis extracts keywords and topics, populating both ChromaDB metadata and KG relationships. Executed plans also populate the KG.
 *   **Extensible Agent Configuration:** Agent capabilities, models, complexity, and speed can be configured via `agents.json`.
 *   **Model Management:** Model downloads are managed via `models.conf`.
 *   **Web UI (Streamlit):** Provides an interactive interface with various operation modes, including the new KB Explorer.

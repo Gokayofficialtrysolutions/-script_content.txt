@@ -1,3 +1,7 @@
+"""
+Unit tests for TerminusOrchestrator methods related to Knowledge Base (ChromaDB)
+interactions, specifically store_knowledge and retrieve_knowledge.
+"""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import json

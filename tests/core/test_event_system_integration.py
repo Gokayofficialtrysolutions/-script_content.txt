@@ -1,3 +1,8 @@
+"""
+Unit tests for the core event system (publish, subscribe, dispatch loop)
+and key event handlers within the TerminusOrchestrator, primarily
+focusing on the integration and behavior of _event_handler_kb_content_added.
+"""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import json

@@ -44,13 +44,13 @@
 
 ## Section 2: "Roadmap: Towards an Ultimate AGI Orchestrator"
 
-**Overall AGI Orchestrator Progress:** ~25-30% (V1 foundations, V1.x enhancements, plus initial KG, resource-aware planning, advanced NLU, tool suggestion, and testing framework).
+**Overall AGI Orchestrator Progress:** ~28-33% (Includes KG storage/retrieval of simplified plans for MasterPlanner context, and expanded core testing).
 
 ### Phase X: Advanced Cognitive Orchestration
 *Key Objectives:*
 *   [X] **Enhanced `MasterPlanner` Capabilities (Evolution):** (Initial capabilities implemented, learning mechanisms enhanced)
     *   [X] Complex Plan Execution (parallel, conditional, looping/retry) - *Initial retry and parallel execution implemented.*
-    *   [X] Dynamic Plan Adaptation & Learning - *Initial targeted revision context and learning from feedback reports implemented. Topic utilization from KB also enhances adaptation.*
+    *   [P] Dynamic Plan Adaptation & Learning - *Initial targeted revision context and learning from feedback reports implemented. Topic utilization from KB, and retrieval of simplified past plan structures from KG also enhance adaptation and learning.*
     *   [P] Resource-Aware & Prioritized Planning - *Agent `estimated_speed` added; MasterPlanner prompt updated for speed, complexity, and request priority.*
 *   [X] **Sophisticated Intent Understanding & Contextual Awareness:** (Initial NLU enhancements implemented)
     *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *Enhanced with NER, alternative intent suggestion, implicit goal extraction; MasterPlanner KB pre-query leverages this. MasterPlanner prompt updated for richer NLU.*
@@ -59,10 +59,10 @@
 
 ### Phase Y: System Learning, Memory & Adaptation
 *Key Objectives:*
-*   [P] **Persistent & Adaptive Knowledge Base:** (Core ChromaDB implemented, initial Graph DB started)
+*   [P] **Persistent & Adaptive Knowledge Base:** (Core ChromaDB implemented, Graph DB for plan summaries and relationships)
     *   [X] Store, retrieve, manage diverse knowledge (facts, procedures, preferences, learned associations) - *ChromaDB backend, store/retrieve methods, UI explorer implemented. Data types include doc excerpts, web summaries, code explanations/generations, plan execution logs, feedback reports.*
     *   [X] Automated content enrichment (keyword & topic extraction) for most new KB entries.
-    *   [P] Hybrid DB approach (vector + graph) - *Initial SQLite-based graph DB (`kb_nodes`, `kb_edges`) designed and implemented. Basic population from KB events (linking items to topics/keywords, plan logs, feedback reports) added. MasterPlanner now queries this graph for related items.*
+    *   [P] Hybrid DB approach (vector + graph) - *SQLite-based graph DB stores relationships (item-topic/keyword, plan-feedback) and simplified plan structures. MasterPlanner retrieves related items and past simplified plans from KG to inform planning.*
 *   [X] **Comprehensive User Feedback Loop & Reinforcement Learning:** (Feedback collection, analysis, and planner utilization implemented)
     *   [X] Explicit user feedback mechanisms (ratings, corrections) - *UI widgets for feedback integrated across relevant UI outputs.*
     *   [X] System analyzes feedback to generate summary reports, stored in KB.
@@ -127,5 +127,5 @@
 *   [ ] Ethical Alignment & User Control
 *   [ ] Performance Optimization & Efficiency
 *   [ ] Dependency Management & Upgradability
-*   [P] Comprehensive Testing & Validation - *Test framework setup with Pytest. Unit tests implemented for `KnowledgeGraph` class and core `TerminusOrchestrator` logic (`classify_user_intent`, `_evaluate_plan_condition`).*
+*   [P] Comprehensive Testing & Validation - *Test framework setup with Pytest. Unit tests implemented for `KnowledgeGraph`, core `TerminusOrchestrator` logic (`classify_user_intent`, `_evaluate_plan_condition`), ChromaDB interactions (`store_knowledge`, `retrieve_knowledge`), and Event Bus/core handlers (`_event_handler_kb_content_added`).*
 *   [ ] Documentation & Community
