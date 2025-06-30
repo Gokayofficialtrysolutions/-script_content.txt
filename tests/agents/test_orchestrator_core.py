@@ -276,6 +276,103 @@ class TestOrchestratorEvaluatePlanCondition:
         assert result["status"] == "error"
         assert "Unsupported operator" in result["message"]
 
+@pytest.mark.asyncio
+class TestOrchestratorAsyncTaskManagement:
+
+    async def test_submit_async_task_registers_and_starts(self, orchestrator_instance: TerminusOrchestrator):
+        dummy_coro_mock = AsyncMock(return_value="dummy_success") # A coroutine that can be awaited
+
+        task_name = "TestDummyTask"
+        task_id = await orchestrator_instance.submit_async_task(dummy_coro_mock(), name=task_name) # Call coro to get awaitable
+
+        assert isinstance(task_id, str)
+
+        # Check registry immediately after submission
+        task_info_initial = await orchestrator_instance.get_async_task_info(task_id)
+        assert task_info_initial is not None
+        assert task_info_initial.task_id == task_id
+        assert task_info_initial.name == task_name
+        # Status could be PENDING or already RUNNING depending on event loop scheduling
+        assert task_info_initial.status in [AsyncTaskStatus.PENDING, AsyncTaskStatus.RUNNING]
+
+        assert task_id in orchestrator_instance.active_async_tasks # asyncio.Task object should be there
+
+        # Allow time for the task to run and complete via _async_task_wrapper
+        await asyncio.sleep(0.05)
+
+        task_info_final = await orchestrator_instance.get_async_task_info(task_id)
+        assert task_info_final is not None
+        assert task_info_final.status == AsyncTaskStatus.COMPLETED
+        assert task_info_final.result == "dummy_success"
+        assert task_id not in orchestrator_instance.active_async_tasks # Should be removed after completion
+
+        dummy_coro_mock.assert_awaited_once()
+
+
+    async def test_async_task_wrapper_handles_success(self, orchestrator_instance: TerminusOrchestrator):
+        async def successful_coro():
+            await asyncio.sleep(0.01)
+            return "all_good"
+
+        task_id = await orchestrator_instance.submit_async_task(successful_coro(), name="SuccessTest")
+        await asyncio.sleep(0.05) # Allow wrapper to complete
+
+        task_info = await orchestrator_instance.get_async_task_info(task_id)
+        assert task_info is not None
+        assert task_info.status == AsyncTaskStatus.COMPLETED
+        assert task_info.result == "all_good"
+        assert task_info.error is None
+        assert task_id not in orchestrator_instance.active_async_tasks
+
+    async def test_async_task_wrapper_handles_failure(self, orchestrator_instance: TerminusOrchestrator):
+        async def failing_coro():
+            await asyncio.sleep(0.01)
+            raise ValueError("coro_failed_intentionally")
+
+        task_id = await orchestrator_instance.submit_async_task(failing_coro(), name="FailureTest")
+        await asyncio.sleep(0.05) # Allow wrapper to complete
+
+        task_info = await orchestrator_instance.get_async_task_info(task_id)
+        assert task_info is not None
+        assert task_info.status == AsyncTaskStatus.FAILED
+        assert "ValueError: coro_failed_intentionally" in task_info.error
+        assert task_info.result is None
+        assert task_id not in orchestrator_instance.active_async_tasks
+
+    async def test_get_async_task_info_non_existent(self, orchestrator_instance: TerminusOrchestrator):
+        task_info = await orchestrator_instance.get_async_task_info("non_existent_task_id_123")
+        assert task_info is None
+
+    async def test_cancel_async_task_basic(self, orchestrator_instance: TerminusOrchestrator):
+        sleep_duration = 0.2
+        async def long_running_coro():
+            try:
+                await asyncio.sleep(sleep_duration)
+                return "should_be_cancelled"
+            except asyncio.CancelledError:
+                # print("long_running_coro was cancelled as expected.")
+                raise # Important to re-raise for the wrapper to catch it
+
+        task_id = await orchestrator_instance.submit_async_task(long_running_coro(), name="CancellableTask")
+
+        # Give it a moment to start
+        await asyncio.sleep(0.01)
+        task_info_before_cancel = await orchestrator_instance.get_async_task_info(task_id)
+        assert task_info_before_cancel.status == AsyncTaskStatus.RUNNING
+
+        cancelled_successfully = await orchestrator_instance.cancel_async_task(task_id)
+        assert cancelled_successfully == True
+
+        # Allow cancellation to propagate and wrapper to handle it
+        await asyncio.sleep(sleep_duration + 0.05)
+
+        task_info_after_cancel = await orchestrator_instance.get_async_task_info(task_id)
+        assert task_info_after_cancel is not None
+        assert task_info_after_cancel.status == AsyncTaskStatus.CANCELLED
+        assert "Task was cancelled" in task_info_after_cancel.error
+        assert task_id not in orchestrator_instance.active_async_tasks
+
+
 # Pytest needs to be able to find 'src'
 # One way: export PYTHONPATH=./src:$PYTHONPATH
 # Or use a conftest.py in the tests directory:
@@ -296,102 +393,19 @@ class TestOrchestratorEvaluatePlanCondition:
 # and methods are restored, or if they are designed to be patched this way.
 # For these tests, it should be acceptable.
 #
-# The `_evaluate_plan_condition` method in the orchestrator currently takes `full_plan_list: List[Dict]`.
-# This is used to determine the actual key in `step_outputs` based on `source_step_id` and `output_variable_name`.
-# So, tests for `_evaluate_plan_condition` need to provide a minimal `full_plan_list` mock.
-# The current implementation of _evaluate_plan_condition does NOT use full_plan_list.
-# It directly uses `step_outputs.get(source_step_output_key)` which implies `source_step_output_key` is directly the key.
-# The code for `source_step_output_key` in _evaluate_plan_condition is:
-# `source_step_output_key = next((step_cfg.get("output_variable_name", f"step_{source_step_id}_output") for step_cfg in full_plan_list if step_cfg.get("step_id") == source_step_id), None)`
-# So, `full_plan_list` *is* used. The tests need to reflect this. My tests for _evaluate_plan_condition are updated.
-
-# The orchestrator_instance fixture has been updated to ensure NLUAnalysisAgent is present.
-# The calls to _init_chromadb_client and _init_knowledge_graph in __init__ are mocked.
-# This is a common pattern for unit testing when full integration is not desired for specific tests.
-# The restoration of original_init_chroma etc. might be tricky if they were instance methods
-# or if tests run in parallel. For sequential tests and class/static methods, it might be okay.
-# Given these are helper methods for __init__, mocking them for the duration of the fixture
-# seems like a pragmatic approach for these specific unit tests.
-# The `TerminusOrchestrator._init_chromadb_client = MagicMock...` approach modifies the class directly.
-# This will affect all instances created after the mock is set up if not carefully managed.
-# A cleaner way for future:
-# @patch('src.agents.master_orchestrator.TerminusOrchestrator._init_chromadb_client', MagicMock(return_value=None))
-# @patch('src.agents.master_orchestrator.TerminusOrchestrator._init_knowledge_graph', MagicMock(return_value=None))
-# def orchestrator_instance(): ...
-# However, this requires pytest-mock or unittest.mock.patch to be used as decorators or context managers.
-# The current fixture is a simpler start.
-# I've removed the restoration part as it's complex and might not work as intended depending on how pytest handles fixtures and class state.
-# For unit tests, each test should ideally get a "fresh" instance or have mocks self-contained.
-# The current `orchestrator_instance` fixture will create one instance per test function due to its scope.
-# The class-level mocks will persist for the duration of the test session unless explicitly reset.
-# This is a common simplification for initial test suites.
+# The `_evaluate_plan_condition` method in the orchestrator takes `full_plan_list: List[Dict]`.
+# Tests for `_evaluate_plan_condition` correctly provide this.
 #
-# Added a check to ensure NLUAnalysisAgent is in self.agents for classify_user_intent tests.
-# This is because the test might run in an environment where agents.json isn't fully loaded or is minimal.
-# We should ensure that the agent being tested for (NLUAnalysisAgent) is available for the test.
-# This could also be done by mocking `self.agents` in the orchestrator fixture for more control.
-# For now, appending if missing is a simple fix.
+# The `orchestrator_instance` fixture mocks heavy dependencies like ChromaDB and KG initialization
+# by patching the class methods `_init_chromadb_client` and `_init_knowledge_graph` during its setup.
+# This was incorrect as these are not class methods but part of the instance initialization logic.
+# The fixture has been corrected to patch the actual client constructors (`chromadb.PersistentClient`, `KnowledgeGraph`)
+# or mock the instance attributes directly after creation.
 #
-# Corrected _evaluate_plan_condition tests to pass a minimal full_plan_list_mock where necessary.
-# This is because the method uses it to resolve the actual key for step_outputs.
-# The current _evaluate_plan_condition uses `source_output_variable` to access nested dicts from the value
-# retrieved using `source_step_output_key`. So, the tests should reflect this.
-# Example: step_outputs = {"key_from_plan_list": {"path": {"to": "value"}}}
-# source_step_id -> "s1"
-# source_output_variable -> "path.to"
-# full_plan_list_mock = [{"step_id": "s1", "output_variable_name": "key_from_plan_list"}]
-#
-# The `_evaluate_plan_condition` logic for `source_step_output_key` was:
-# `source_step_output_key = next((p.get("output_variable_name",f"step_{dep_id}_output") for p in full_plan_list if p.get("step_id")==dep_id),None)` - this was from `_execute_single_plan_step`.
-# The actual code in `_evaluate_plan_condition` for `source_step_output_key` is:
-# `source_step_output_key = None`
-# `for step_cfg in full_plan_list: if step_cfg.get("step_id") == source_step_id: source_step_output_key = step_cfg.get("output_variable_name", f"step_{source_step_id}_output"); break`
-# This is correct. My tests for nested paths are now structured to align with this.
-#
-# The `_evaluate_plan_condition` does not take `full_plan_list` as an argument in the actual code.
-# It takes `condition_def: Dict, step_outputs: Dict`.
-# The `source_step_output_key` is derived using `condition_def.get("source_step_id")` and `full_plan_list`
-# which is `self.current_plan_being_executed` within the context of `_handle_conditional_step`.
-# The unit test for `_evaluate_plan_condition` should pass `full_plan_list` as an argument.
-# My method signature in the test was initially wrong. Corrected it.
-# The current method signature in `master_orchestrator.py` is `_evaluate_plan_condition(self, condition_def: Dict, step_outputs: Dict, full_plan_list: List[Dict]) -> Dict:`
-# My tests are now aligned with this signature.
-#
-# Small correction in orchestrator_instance fixture:
-# `TerminusOrchestrator._init_chromadb_client = MagicMock(return_value=None)`
-# `TerminusOrchestrator._init_knowledge_graph = MagicMock(return_value=None)`
-# These methods don't exist on the class. The actual init calls `self.chroma_client = ...` and `self.kg_instance = ...`.
-# The fixture should mock `chromadb.PersistentClient` and `KnowledgeGraph` constructors or the instances on `self`.
-# For simplicity, I've just set `orchestrator.knowledge_collection = MagicMock()` and `orchestrator.kg_instance = MagicMock()`
-# after instance creation. This is a common way to stub out dependencies for unit tests.
-# The previous attempt to mock non-existent class methods was incorrect.
-#
-# The `_service_docsummarizer_summarize_text` test is not part of this file.
-# This file is for core orchestrator logic, not specific service handlers.
-# Service handlers would be tested in a different file, likely `test_orchestrator_services.py`.
-#
-# Corrected the fixture for `orchestrator_instance` to properly mock dependencies.
-# Removed the class method mocking as it was incorrect.
-# Instead, directly mock instance attributes `knowledge_collection` and `kg_instance` after creation.
-# This is cleaner for unit testing these specific methods.
-# Added `pytest-asyncio` marker to the classes.
-# Ensured NLUAnalysisAgent is present if orchestrator.agents is loaded from a minimal/empty agents.json during tests.
-# This can be done by checking `orchestrator.agents` after initialization in the fixture.
-# Corrected the test `test_classify_intent_nlu_agent_missing` to properly simulate agent absence.
-# Corrected `_evaluate_plan_condition` tests to pass `full_plan_list_mock`.
-# The `_evaluate_plan_condition` method in the actual code does NOT take `full_plan_list` as an argument.
-# It is called by `_handle_conditional_step` which has access to `full_plan_list` (likely `self.current_plan_list`).
-# So, the test for `_evaluate_plan_condition` does not need `full_plan_list`.
-# Okay, I've reviewed the `_evaluate_plan_condition` in `master_orchestrator.py` again.
-# It is `async def _evaluate_plan_condition(self, condition_def: Dict, step_outputs: Dict, full_plan_list: List[Dict]) -> Dict:`
-# So it *does* take `full_plan_list`. My tests were correct in passing it.
-# The fixture for orchestrator_instance now more robustly ensures NLUAnalysisAgent is available.
-# The test structure for `_evaluate_plan_condition` is correct in passing `full_plan_list`.
-# The mocking of `_init_chromadb_client` etc. was indeed incorrect as those are not methods.
-# The current fixture approach of setting `orchestrator.knowledge_collection = MagicMock()` etc. is fine.
-# Final check of the `orchestrator_instance` fixture and test methods.
-# The fixture now ensures `NLUAnalysisAgent` exists in `orchestrator.agents`.
-# The tests for `classify_user_intent` correctly mock `orchestrator_instance.execute_agent`.
-# The tests for `_evaluate_plan_condition` correctly pass arguments.
-# The `pytest.mark.asyncio` is correctly applied.
-# Looks good.
+# For async task management tests, it's important that the asyncio event loop can run.
+# `pytest-asyncio` handles this when tests are marked with `@pytest.mark.asyncio`.
+# The `_async_task_wrapper` is an internal method that handles the lifecycle of tasks submitted via `submit_async_task`.
+# Testing it involves submitting a task and then observing its state changes and final outcome in the `async_task_registry`.
+# Import `AsyncTaskStatus` and `AsyncTask` from `src.core.async_tools` for type hints and creating mock objects.
+from src.core.async_tools import AsyncTask, AsyncTaskStatus # Added for async tests
+import asyncio # For sleep and other async utilities
