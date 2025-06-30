@@ -1749,17 +1749,18 @@ class TerminusOrchestrator:
 
            if current_attempt == 0:
                # The actual planning prompt construction happens here.
-               # For now, it doesn't use selected_strategy to change content, but it's logged.
+               # Pass the selected_strategy to the prompt constructor.
                planning_prompt = prompt_constructors.construct_main_planning_prompt(
                    user_prompt=user_prompt,
                    history_context=history_context_string,
                    nlu_summary=nlu_summary_for_prompt,
                    kb_general_context=kb_general_ctx_str,
                    kg_derived_context=kg_derived_context_str,
-                   kg_past_plan_summary_context=kg_past_plan_summary_context_str, # Pass new past plan context
+                   kg_past_plan_summary_context=kg_past_plan_summary_context_str,
                    kb_plan_log_context=kb_plan_log_ctx_str,
                    kb_feedback_context=kb_feedback_ctx_str,
-                   agent_capabilities_description=agent_capabilities_desc
+                   agent_capabilities_description=agent_capabilities_desc,
+                   planner_strategy=selected_strategy # Pass the chosen strategy
                )
            else: # Constructing a revision prompt
                print(f"{plan_handler_id} INFO: Constructing revision prompt with failure context.")

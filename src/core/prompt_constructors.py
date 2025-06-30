@@ -72,22 +72,40 @@ def format_feedback_report_for_prompt(kb_hit:Dict) -> str:
 # Was: _construct_main_planning_prompt(self, user_prompt:str, history_context:str, nlu_info:str, general_kb_context:str, plan_log_insights:str, feedback_insights_context:str, agent_desc:str) -> str
 def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_info:str,
                                  general_kb_context:str, kg_derived_context:str,
-                                 kg_past_plan_summary_context:str, # Added past_plan_summary_context
+                                 kg_past_plan_summary_context:str,
                                  plan_log_insights:str, feedback_insights_context:str,
-                                 agent_desc:str) -> str:
+                                 agent_desc:str,
+                                 planner_strategy: Optional[str] = "Strategy_Default") -> str: # Added planner_strategy
    kb_section = ""
    if general_kb_context.strip(): kb_section += general_kb_context
    if kg_derived_context.strip(): kb_section += kg_derived_context
-   if kg_past_plan_summary_context.strip(): kb_section += kg_past_plan_summary_context # Add past plan summaries
+   if kg_past_plan_summary_context.strip(): kb_section += kg_past_plan_summary_context
    if plan_log_insights.strip(): kb_section += plan_log_insights
    if feedback_insights_context.strip(): kb_section += feedback_insights_context
+
+   strategy_specific_instructions = ""
+   if planner_strategy == "Strategy_FocusClarity":
+       strategy_specific_instructions = (
+           "\n--- CURRENT PLANNING STRATEGY: FOCUS ON CLARITY ---\n"
+           "Your primary goal for this plan is CLARITY and EXPLICITNESS. Each step must be clearly defined with an unambiguous purpose. "
+           "If intermediate data transformations are needed, define them as separate steps. Prefer descriptive task prompts for agents. "
+           "Ensure dependencies are explicitly clear. Avoid overly complex or deeply nested plan structures if a flatter, "
+           "clearer alternative exists, even if it means a few more simple steps.\n"
+       )
+   elif planner_strategy == "Strategy_PrioritizeBrevity":
+       strategy_specific_instructions = (
+           "\n--- CURRENT PLANNING STRATEGY: PRIORITIZE BREVITY ---\n"
+           "Your primary goal for this plan is BREVITY and EFFICIENCY. Aim for the minimum number of steps required to achieve the user's core request. "
+           "Prefer direct approaches and simpler agent interactions. Task prompts for agents should be concise. Only include essential dependencies.\n"
+       )
+   # Default strategy has no extra specific instructions beyond the general ones.
 
    context_usage_instructions = (
        "When creating the plan, consider the following:\n"
        "1. The 'NLU Analysis' provides the primary intent, confidence score, any alternative intents, extracted entities, and potentially implicit user goals for the CURRENT request. Use all these NLU facets to deeply understand the user's needs.\n"
-       "2. Context from various Knowledge Base sources is provided: 'General Context' (semantic search), 'Knowledge Graph Derived Context' (entity/topic links), 'Past Simplified Plan Structures' (for similar intents), 'Insights from Past Plan Executions' (detailed logs), and 'Feedback Insights'. Use all available context to learn from past successes, failures, and user feedback.\n" # Updated
+       "2. Context from various Knowledge Base sources is provided: 'General Context' (semantic search), 'Knowledge Graph Derived Context' (entity/topic links), 'Past Simplified Plan Structures' (for similar intents), 'Insights from Past Plan Executions' (detailed logs), and 'Feedback Insights'. Use all available context to learn from past successes, failures, and user feedback.\n"
        "3. If 'Extracted Keywords' or 'Extracted Topics' are listed with any KB items, these can help refine task prompts or agent choices.\n"
-       "4. Review 'Past Simplified Plan Structures' for similar intents. Note their success/failure, agent sequences, and key entities to inform your current plan. Avoid repeating past failures if possible.\n" # New instruction
+       "4. Review 'Past Simplified Plan Structures' for similar intents. Note their success/failure, agent sequences, and key entities to inform your current plan. Avoid repeating past failures if possible.\n"
        "5. Agent 'Complexity' (low, medium, high) and 'Speed' (fast, medium, slow) ratings should guide agent selection. \n"
        "   - For simple tasks, favor agents with low complexity.\n"
        "   - For complex tasks, you might need high complexity agents; consider if the task can be broken down, especially if NLU indicates multiple intents or complex implicit goals.\n"
@@ -102,12 +120,13 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
            f"{history_context}"
            f"--- KNOWLEDGE BASE & NLU CONTEXT ---\n"
            f"Current User Request: '{user_prompt}'\n"
-           f"NLU Analysis of Current Request (Intent, Entities, Implicit Goals, Alternatives):\n{nlu_info}\n\n" # Enhanced nlu_info usage
+           f"NLU Analysis of Current Request (Intent, Entities, Implicit Goals, Alternatives):\n{nlu_info}\n\n"
            f"{kb_section if kb_section.strip() else 'No specific information retrieved from Knowledge Base for this request.'}\n"
-           f"{context_usage_instructions}\n"
+           f"{context_usage_instructions}"
+           f"{strategy_specific_instructions}\n" # Added strategy specific instructions here
            f"--- AVAILABLE AGENTS & TASK ---\n"
            f"Available specialized agents and their capabilities are:\n{agent_desc}\n\n"
-           f"TASK: Based on ALL the above information, create a detailed, step-by-step JSON plan to fulfill the user's current request. \n"
+           f"TASK: Based on ALL the above information (especially noting the CURRENT PLANNING STRATEGY if specified), create a detailed, step-by-step JSON plan to fulfill the user's current request. \n" # Emphasize strategy
            f"Plan Schema:\n"
            f"  - 'step_id': (String) Unique ID (e.g., \"1\", \"2a\", \"cond_check_user_pref\").\n"
            f"  - 'agent_name': (String) Agent from list OR 'parallel_group' OR 'conditional' OR 'loop' (if using step_type).\n"
