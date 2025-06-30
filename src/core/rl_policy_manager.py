@@ -316,6 +316,87 @@ if __name__ == '__main__':
 
     if test_policy_file.exists():
         test_policy_file.unlink() # Clean up
-        print(f"\nCleaned up {test_policy_file}")
+        print(f"Cleaned up {test_policy_file}")
 
+    # --- Test process_experience_log ---
+    print("\n--- Testing process_experience_log ---")
+    dummy_log_file = Path("./dummy_rl_experience.log")
+    dummy_policy_file_for_log_test = Path("./test_rl_policy_from_log.json")
+
+    if dummy_policy_file_for_log_test.exists():
+        dummy_policy_file_for_log_test.unlink()
+
+    # Create dummy log entries
+    log_entries = [
+        {
+            "rl_interaction_id": "interaction1", "attempt_number": 0, "timestamp_start_iso": "ts1",
+            "state": {"nlu_intent": "code_generation", "kb_hits": 2, "previous_cycle_outcome": "none"},
+            "action_taken": "Strategy_A", "master_planner_prompt_details": {}, "generated_plan_json": "[]",
+            "plan_parsing_status": "success", "final_executed_plan_json": "[]", "execution_status": "success",
+            "user_feedback_rating": None, "calculated_reward": 1.0, "next_state": None, "done": True, "timestamp_end_iso": "ts2"
+        },
+        {
+            "rl_interaction_id": "interaction2", "attempt_number": 0, "timestamp_start_iso": "ts3",
+            "state": {"nlu_intent": "web_search", "user_prompt_length_category": "short", "previous_cycle_outcome": "success"},
+            "action_taken": "Strategy_B", "master_planner_prompt_details": {}, "generated_plan_json": "[]",
+            "plan_parsing_status": "success", "final_executed_plan_json": "[]", "execution_status": "failure",
+            "user_feedback_rating": "negative", "calculated_reward": -0.5, "next_state": None, "done": True, "timestamp_end_iso": "ts4"
+        },
+        { # Another for code_generation, Strategy_A to test aggregation
+            "rl_interaction_id": "interaction3", "attempt_number": 0, "timestamp_start_iso": "ts5",
+            "state": {"nlu_intent": "code_generation", "kb_hits": 2, "previous_cycle_outcome": "none"}, # Same state as first entry
+            "action_taken": "Strategy_A", "master_planner_prompt_details": {}, "generated_plan_json": "[]",
+            "plan_parsing_status": "success", "final_executed_plan_json": "[]", "execution_status": "success",
+            "user_feedback_rating": "positive", "calculated_reward": 1.5, "next_state": None, "done": True, "timestamp_end_iso": "ts6"
+        },
+        # Malformed entry
+        {"broken_json_record": True},
+        # Entry with missing critical field
+        {
+            "rl_interaction_id": "interaction4", "attempt_number": 0, "timestamp_start_iso": "ts7",
+            "state": {"nlu_intent": "other"}, # missing action_taken and calculated_reward
+            "master_planner_prompt_details": {}, "generated_plan_json": "[]",
+            "plan_parsing_status": "success", "final_executed_plan_json": "[]", "execution_status": "success",
+            "user_feedback_rating": None, "next_state": None, "done": True, "timestamp_end_iso": "ts8"
+        }
+    ]
+    with open(dummy_log_file, 'w', encoding='utf-8') as f:
+        for entry in log_entries:
+            if "broken_json_record" in entry:
+                f.write("this is not valid json\n")
+            else:
+                json.dump(entry, f)
+                f.write('\n')
+
+    log_test_policy_manager = RLPolicyManager(policy_storage_path=dummy_policy_file_for_log_test)
+    processed_count = log_test_policy_manager.process_experience_log(dummy_log_file)
+    print(f"Processed {processed_count} entries from dummy log.")
+
+    state_key_cg = log_test_policy_manager._construct_state_key({"nlu_intent": "code_generation", "kb_hits": 2, "previous_cycle_outcome": "none"})
+    state_key_ws = log_test_policy_manager._construct_state_key({"nlu_intent": "web_search", "user_prompt_length_category": "short", "previous_cycle_outcome": "success"})
+
+    print(f"\nPreferences after processing log for state '{state_key_cg}':")
+    for action, data in log_test_policy_manager.get_action_preferences_for_state(state_key_cg).items():
+        print(f"  Action: {action}, Data: {data}")
+        if action == "Strategy_A":
+            assert data["count"] == 2
+            assert data["total_reward"] == 2.5
+            assert data["mean_reward"] == 1.25
+
+    print(f"\nPreferences after processing log for state '{state_key_ws}':")
+    for action, data in log_test_policy_manager.get_action_preferences_for_state(state_key_ws).items():
+        print(f"  Action: {action}, Data: {data}")
+        if action == "Strategy_B":
+            assert data["count"] == 1
+            assert data["total_reward"] == -0.5
+            assert data["mean_reward"] == -0.5
+
+    assert processed_count == 3 # 3 valid entries
+
+    if dummy_log_file.exists():
+        dummy_log_file.unlink()
+        print(f"Cleaned up {dummy_log_file}")
+    if dummy_policy_file_for_log_test.exists():
+        dummy_policy_file_for_log_test.unlink()
+        print(f"Cleaned up {dummy_policy_file_for_log_test}")
 ```
