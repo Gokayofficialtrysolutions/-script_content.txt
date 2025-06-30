@@ -47,6 +47,7 @@ from ..core.event_system import SystemEvent
 from ..core.conversation_history import ConversationTurn, ConversationContextManager
 from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC # New KB Schema Imports
 from ..core.knowledge_graph import KnowledgeGraph # Import KnowledgeGraph
+from ..core.rl_policy_manager import RLPolicyManager # Import RLPolicyManager
 
 
 # --- New/Modified Dataclasses for Service Definitions ---
@@ -264,6 +265,15 @@ class TerminusOrchestrator:
        except Exception as e_kg:
            self.kg_instance = None
            print(f"CRITICAL ERROR initializing KnowledgeGraph: {e_kg}. Graph features will be unavailable.")
+
+       # Initialize RL Policy Manager
+       self.rl_policy_storage_path = self.data_dir / "rl_action_preferences.json"
+       try:
+           self.rl_policy_manager = RLPolicyManager(policy_storage_path=self.rl_policy_storage_path)
+           print(f"RLPolicyManager initialized. Policy storage: {self.rl_policy_storage_path}")
+       except Exception as e_rl_init:
+           self.rl_policy_manager = None
+           print(f"CRITICAL ERROR initializing RLPolicyManager: {e_rl_init}. RL-based strategy selection will be disabled.")
 
 
    async def _orchestrate_conversation_summarization(self):
@@ -1688,19 +1698,37 @@ class TerminusOrchestrator:
                "past_plan_summary_hits_count": len(kg_past_plan_summary_context_str.splitlines()) -1 if kg_past_plan_summary_context_str.strip() else 0, # New
                "plan_log_hits_count": len(kb_plan_log_ctx_str.splitlines()) -1 if kb_plan_log_ctx_str.strip() else 0,
                "feedback_hits_count": len(kb_feedback_ctx_str.splitlines()) -1 if kb_feedback_ctx_str.strip() else 0,
-               "kg_derived_hits_count": len(kg_derived_context_str.splitlines()) -1 if kg_derived_context_str.strip() else 0, # Added
+               "kg_derived_hits_count": len(kg_derived_context_str.splitlines()) -1 if kg_derived_context_str.strip() else 0,
+               "past_plan_summary_hits_count": len(kg_past_plan_summary_context_str.splitlines()) -1 if kg_past_plan_summary_context_str.strip() else 0, # New
            }
            current_rl_state = self._construct_rl_state(user_prompt, first_attempt_nlu_output, current_rl_state_kb_summary, None)
-           current_rl_action = "Action_DefaultPrompt_InitialLog"
-           current_prompt_details = {"strategy": "standard_initial_log"}
 
-           if state_for_executed_plan_log is None :
+           # --- RL-based Planner Strategy Selection ---
+           available_planner_strategies = ["Strategy_Default", "Strategy_FocusClarity", "Strategy_PrioritizeBrevity"] # Example strategies
+           selected_strategy = "Strategy_Default" # Default
+           if self.rl_policy_manager:
+               state_key_for_rl = self.rl_policy_manager._construct_state_key(current_rl_state)
+               chosen_action = self.rl_policy_manager.get_best_action(state_key_for_rl, available_planner_strategies)
+               if chosen_action:
+                   selected_strategy = chosen_action
+                   print(f"[{plan_handler_id}] RLPolicyManager selected strategy: {selected_strategy} for state: {state_key_for_rl}")
+               else:
+                   print(f"[{plan_handler_id}] RLPolicyManager returned no specific strategy, using default: {selected_strategy}")
+           else:
+               print(f"[{plan_handler_id}] RLPolicyManager not available, using default strategy: {selected_strategy}")
+
+           current_rl_action = selected_strategy # This is what gets logged as 'action_taken'
+           current_prompt_details = {"strategy_used": selected_strategy, "llm_model": planner_agent.model if planner_agent else "Unknown"} # Log the chosen strategy
+           # Note: For this iteration, all strategies still use the same construct_main_planning_prompt.
+           # Future work: construct_main_planning_prompt could take selected_strategy and vary prompt content.
+
+           if state_for_executed_plan_log is None : # This logs details of the first planning attempt
                 state_for_executed_plan_log = current_rl_state
                 action_for_executed_plan_log = current_rl_action
                 prompt_details_for_executed_plan_log = current_prompt_details
 
            if current_attempt == 0:
-               planning_prompt = prompt_constructors.construct_main_planning_prompt(
+               planning_prompt = prompt_constructors.construct_main_planning_prompt( # This call remains the same for now
                    user_prompt=user_prompt,
                    history_context=history_context_string,
                    nlu_summary=nlu_summary_for_prompt,
