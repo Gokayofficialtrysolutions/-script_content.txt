@@ -121,6 +121,7 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
            f"For 'conditional': include 'condition': {{'source_step_id':'id', 'source_output_variable':'path.to.var', 'operator':'equals|etc.', 'value':'compare_val', 'value_type':'string|etc'}}, 'if_true_step_id':'id_true', 'if_false_step_id':'id_false' (optional). Ensure 'dependencies' includes 'condition.source_step_id'.\n"
            f"For 'loop' ('loop_type':'while'): include 'condition': {{...as conditional...}}, 'loop_body_step_ids':['id1', 'id2'], 'max_iterations':10 (optional). The loop continues while condition is true. Loop body steps (id1, id2) must be defined elsewhere in the main plan list.\n"
            f"For 'agent_service_call': include 'target_agent_name':'AgentName', 'service_name':'ServiceName', 'service_params':{{'key':'val'}}. Use for direct, structured calls to other agents if their services are known.\n"
+           f"For 'SystemCapabilityManager': if task_prompt is 'SUGGEST_NEW_TOOL', include 'suggested_tool_description': (String) detailing the missing capability.\n"
            f"Example Agent Step: {{'step_id': '1', 'agent_name': 'WebCrawler', 'task_prompt': 'Search for X', 'output_variable_name': 'search_X'}}\n"
            f"IMPORTANT: Output ONLY the raw JSON plan as a list of step objects. If unplannable or request is too simple for a plan, return an empty JSON list []." )
 

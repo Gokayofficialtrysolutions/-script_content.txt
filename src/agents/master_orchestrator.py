@@ -1766,9 +1766,22 @@ class TerminusOrchestrator:
 
                    step_result_or_task: Dict # To hold result from sync step or task info from async submission
                    step_type = step_to_evaluate.get("step_type", "agent_execution")
+                   agent_name_for_step = step_to_evaluate.get("agent_name")
 
-                   # --- Step Type Handling (Conditional, Loop, Service Call, Regular Agent) ---
-                   if step_type == "conditional":
+                   # --- Step Type Handling (Conditional, Loop, Service Call, Regular Agent, Tool Suggestion) ---
+                   if agent_name_for_step == "SystemCapabilityManager" and step_to_evaluate.get("task_prompt") == "SUGGEST_NEW_TOOL":
+                       tool_desc = step_to_evaluate.get("suggested_tool_description", "No description provided.")
+                       log_message = f"{datetime.datetime.utcnow().isoformat()} - Tool Suggestion by MasterPlanner: {tool_desc}\n"
+                       try:
+                           with open(self.logs_dir / "tool_suggestions.log", "a", encoding="utf-8") as f:
+                               f.write(log_message)
+                           step_result_or_task = {"step_id": step_id_to_evaluate, "agent_name": "SystemCapabilityManager", "status": "success", "response": "Tool suggestion logged successfully."}
+                           print(f"{dispatch_log_prefix} Logged tool suggestion: {tool_desc}")
+                       except Exception as e_log:
+                           print(f"{dispatch_log_prefix} ERROR logging tool suggestion: {e_log}")
+                           step_result_or_task = {"step_id": step_id_to_evaluate, "agent_name": "SystemCapabilityManager", "status": "error", "response": f"Failed to log tool suggestion: {e_log}"}
+
+                   elif step_type == "conditional":
                        next_step_id_from_cond, eval_res_cond = await self._handle_conditional_step(step_to_evaluate, plan_list, step_outputs, executed_step_ids, plan_handler_id)
                        step_result_or_task = eval_res_cond if eval_res_cond else {"step_id": step_id_to_evaluate, "status":"error", "response":"Conditional eval result missing"}
                        # Conditional step itself is now "executed" (its evaluation is complete)
