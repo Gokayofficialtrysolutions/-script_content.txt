@@ -100,6 +100,31 @@ class WebServiceScrapeResultDC(BaseKBSchema):
     extracted_entities: List[Dict[str, Any]] = field(default_factory=list) # e.g., [{"text": "OpenAI", "type": "ORG"}]
     source_agent_name: Optional[str] = None # e.g., "WebCrawler"
 
+@dataclass
+class SimplifiedPlanStructureDC(BaseKBSchema):
+    """
+    Represents a simplified, structured summary of an executed plan,
+    intended for storage in the Knowledge Graph and for learning purposes.
+    """
+    plan_id: str = field(default_factory=lambda: f"simplan_{uuid.uuid4()}")
+    # Typically, this would be linked to a PlanExecutionRecordDC.record_id
+    # If this simplified plan is stored as its own primary KB item (e.g. in Chroma),
+    # it might have its own chroma_db_id.
+    # For now, assuming it's primarily a KG node document linked to a PlanExecutionRecord.
+    original_request_preview: Optional[str] = None
+    primary_intent: Optional[str] = None
+    status: str = "unknown"  # "success", "failure"
+    num_steps: int = 0
+    agent_sequence: List[str] = field(default_factory=list) # List of agent names in order of execution
+    key_abstractions_or_entities: List[str] = field(default_factory=list) # Key concepts or entities involved in the plan
+    feedback_rating_if_any: Optional[str] = None # "positive", "negative", "neutral", "none"
+    # timestamp_utc is inherited from BaseKBSchema and should be set on creation
+
+    # No separate from_json_string needed if BaseKBSchema's version is sufficient
+    # and all fields are simple types or handled by BaseKBSchema.
+    # If custom logic is needed (e.g. for nested dataclasses not handled by base), override it.
+    # For now, assuming base is okay.
+
 if __name__ == '__main__':
     print("--- Testing PlanExecutionRecordDC ---")
     plan_rec = PlanExecutionRecordDC(

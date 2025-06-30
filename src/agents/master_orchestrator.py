@@ -1590,9 +1590,11 @@ class TerminusOrchestrator:
 
            # --- Query Knowledge Graph for related items based on NLU entities/topics ---
            kg_derived_context_str = ""
+           kg_past_plan_summary_context_str = "" # Initialize new context string
+
            if self.kg_instance and first_attempt_nlu_output.get("status") == "success":
                all_related_kg_items = []
-               # Get entities from NLU
+               # Get entities from NLU (for general KG context)
                entities = first_attempt_nlu_output.get("entities", [])
                for entity in entities[:2]: # Limit number of entities to query for KG
                    entity_text_clean = entity.get("text","").strip().lower().replace(' ', '_')
@@ -1639,11 +1641,51 @@ class TerminusOrchestrator:
                        print(f"[{plan_handler_id}] INFO: No KG derived items formatted for prompt after filtering/processing.")
                else:
                    print(f"[{plan_handler_id}] INFO: No unique KG derived items found from entity/topic graph queries.")
-           else:
-               print(f"[{plan_handler_id}] INFO: KG instance not available or NLU failed, skipping KG derived context.")
+
+               # Retrieve Simplified Past Plans based on primary intent
+               primary_intent = first_attempt_nlu_output.get("intent")
+               if primary_intent:
+                   topic_node_id = f"topic_{primary_intent.lower().replace(' ', '_')}"
+                   # Find SimplifiedPlan nodes (sources) that are related to this intent topic (target)
+                   related_simplified_plan_nodes = self.kg_instance.get_source_nodes_related_to_target(
+                       target_node_id=topic_node_id,
+                       relationship_types=["RELATED_TO_INTENT_TOPIC"], # Edge: SimplifiedPlan -> RELATED_TO_INTENT_TOPIC -> Topic
+                       limit=2 # Get 1-2 past plans
+                   )
+                   if related_simplified_plan_nodes:
+                       formatted_past_plans = []
+                       for sp_node in related_simplified_plan_nodes:
+                           if sp_node.get("node_type") == "SimplifiedPlan":
+                               sp_metadata = sp_node.get("metadata")
+                               if isinstance(sp_metadata, dict):
+                                   sp_json_str = sp_metadata.get("simplified_plan_json")
+                                   if sp_json_str and isinstance(sp_json_str, str):
+                                       try:
+                                           sp_data = SimplifiedPlanStructureDC.from_json_string(sp_json_str)
+                                           status_emoji = "✅" if sp_data.status == "success" else "❌"
+                                           formatted_past_plans.append(
+                                               f"  - Past Plan (Intent: {sp_data.primary_intent}, Status: {sp_data.status} {status_emoji}, Agents: [{', '.join(sp_data.agent_sequence[:3])}...]): Preview: '{sp_data.original_request_preview[:50]}...'"
+                                           )
+                                       except Exception as e_sp_parse:
+                                           print(f"[{plan_handler_id}] WARNING: Failed to parse SimplifiedPlanStructureDC from KG node {sp_node.get('node_id')}'s metadata: {e_sp_parse}")
+                                   else:
+                                       print(f"[{plan_handler_id}] WARNING: 'simplified_plan_json' not found or not a string in metadata for SimplifiedPlan node {sp_node.get('node_id')}.")
+                               else:
+                                   print(f"[{plan_handler_id}] WARNING: Metadata for SimplifiedPlan node {sp_node.get('node_id')} is not a dict.")
+                       if formatted_past_plans:
+                           kg_past_plan_summary_context_str = "Past Simplified Plan Structures (for similar intent):\n" + "\n".join(formatted_past_plans) + "\n\n"
+                           print(f"[{plan_handler_id}] INFO: Retrieved {len(formatted_past_plans)} simplified past plans from KG.")
+                       else:
+                            print(f"[{plan_handler_id}] INFO: No suitable simplified past plans found or parsed from KG for intent '{primary_intent}'.")
+                   else:
+                       print(f"[{plan_handler_id}] INFO: No simplified past plans linked to topic '{topic_node_id}' found in KG.")
+           else: # KG instance not available or NLU failed
+               print(f"[{plan_handler_id}] INFO: KG instance not available or NLU failed, skipping KG derived context and past plan retrieval.")
 
            current_rl_state_kb_summary = {
                "general_hits_count": len(kb_general_ctx_str.splitlines()) -1 if kb_general_ctx_str.strip() else 0,
+               "kg_derived_hits_count": len(kg_derived_context_str.splitlines()) -1 if kg_derived_context_str.strip() else 0, # Retained from previous step
+               "past_plan_summary_hits_count": len(kg_past_plan_summary_context_str.splitlines()) -1 if kg_past_plan_summary_context_str.strip() else 0, # New
                "plan_log_hits_count": len(kb_plan_log_ctx_str.splitlines()) -1 if kb_plan_log_ctx_str.strip() else 0,
                "feedback_hits_count": len(kb_feedback_ctx_str.splitlines()) -1 if kb_feedback_ctx_str.strip() else 0,
                "kg_derived_hits_count": len(kg_derived_context_str.splitlines()) -1 if kg_derived_context_str.strip() else 0, # Added
@@ -1663,7 +1705,8 @@ class TerminusOrchestrator:
                    history_context=history_context_string,
                    nlu_summary=nlu_summary_for_prompt,
                    kb_general_context=kb_general_ctx_str,
-                   kg_derived_context=kg_derived_context_str, # Pass new KG context
+                   kg_derived_context=kg_derived_context_str,
+                   kg_past_plan_summary_context=kg_past_plan_summary_context_str, # Pass new past plan context
                    kb_plan_log_context=kb_plan_log_ctx_str,
                    kb_feedback_context=kb_feedback_ctx_str,
                    agent_capabilities_description=agent_capabilities_desc
@@ -2185,19 +2228,59 @@ class TerminusOrchestrator:
            # "primary_intent": nlu_analysis_data.get("intent", "N/A")
            #     }
            # )
-            # Add PlanLog node to Knowledge Graph
-           if self.kg_instance and stored_kb_id:
+            # Add PlanLog node to Knowledge Graph & SimplifiedPlanStructure node
+           if self.kg_instance and stored_kb_id: # stored_kb_id is PlanExecutionRecordDC's ID
+               # Add/Update the PlanExecutionRecord node in KG
                self.kg_instance.add_node(
-                   node_id=stored_kb_id, # Should be same as plan_record.record_id
+                   node_id=stored_kb_id,
                    node_type="PlanExecutionRecord",
                    content_preview=user_facing_summary_text[:150],
-                   metadata={"status": final_plan_status_str, "intent": plan_record.primary_intent}
+                   metadata={"status": final_plan_status_str, "intent": plan_record.primary_intent, "timestamp_utc": plan_record.timestamp_utc}
                )
                print(f"MasterPlanner: Added/Updated PlanExecutionRecord node '{stored_kb_id}' in Knowledge Graph.")
-               # Conceptual: Link to UserRequest node if UserRequests were stored as nodes
-               # user_request_node_id = f"user_request_{hash(user_prompt_orig)}" # Example ID
-               # self.kg_instance.add_node(user_request_node_id, "UserRequest", user_prompt_orig[:100])
-               # self.kg_instance.add_edge(stored_kb_id, user_request_node_id, "GENERATED_FROM_REQUEST", ensure_nodes=True)
+
+               # Create and store SimplifiedPlanStructureDC
+               try:
+                   parsed_plan_json = json.loads(plan_json_final_attempt) if plan_json_final_attempt else []
+                   agent_sequence = [step.get("agent_name", step.get("target_agent_name", "UnknownAgent")) for step in parsed_plan_json if isinstance(step, dict)]
+                   num_steps = len(parsed_plan_json)
+
+                   key_entities_from_nlu = [entity.get("text") for entity in nlu_output_orig.get("entities", []) if entity.get("text")]
+                   # Could also try to extract key nouns/concepts from user_prompt_orig if NLU entities are sparse
+
+                   simplified_plan = SimplifiedPlanStructureDC(
+                       plan_id=stored_kb_id, # Link to the main plan record ID
+                       original_request_preview=user_prompt_orig[:150],
+                       primary_intent=plan_record.primary_intent,
+                       status=final_plan_status_str,
+                       num_steps=num_steps,
+                       agent_sequence=agent_sequence[:10], # Limit sequence length
+                       key_abstractions_or_entities=key_entities_from_nlu[:5], # Limit entities
+                       feedback_rating_if_any=None # Placeholder, feedback not directly tied here yet
+                       # timestamp_utc will be set by BaseKBSchema
+                   )
+
+                   simplified_plan_node_id = f"simplan_{stored_kb_id}"
+                   self.kg_instance.add_node(
+                       node_id=simplified_plan_node_id,
+                       node_type="SimplifiedPlan",
+                       content_preview=f"Simplified plan for {plan_record.primary_intent} ({final_plan_status_str}, {num_steps} steps)",
+                       metadata={"simplified_plan_json": simplified_plan.to_json_string()} # Store JSON under a key in metadata dict
+                   )
+                   print(f"MasterPlanner: Added/Updated SimplifiedPlan node '{simplified_plan_node_id}' in KG.")
+
+                   # Link PlanExecutionRecord to SimplifiedPlan
+                   self.kg_instance.add_edge(stored_kb_id, simplified_plan_node_id, "DESCRIBED_BY_SIMPLIFIED_PLAN", ensure_nodes=True)
+
+                   # Link SimplifiedPlan to its primary intent topic
+                   if plan_record.primary_intent:
+                       topic_node_id = f"topic_{plan_record.primary_intent.lower().replace(' ', '_')}"
+                       self.kg_instance.add_node(topic_node_id, "Topic", plan_record.primary_intent) # Ensure topic node exists
+                       self.kg_instance.add_edge(simplified_plan_node_id, topic_node_id, "RELATED_TO_INTENT_TOPIC", ensure_nodes=True)
+                   print(f"MasterPlanner: Added KG edges for SimplifiedPlan '{simplified_plan_node_id}'.")
+
+               except Exception as e_kg_sps:
+                   print(f"MasterPlanner: ERROR processing or storing SimplifiedPlanStructure in KG: {e_kg_sps}")
 
            return stored_kb_id
        else:

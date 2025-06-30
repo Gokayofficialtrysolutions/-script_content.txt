@@ -71,28 +71,31 @@ def format_feedback_report_for_prompt(kb_hit:Dict) -> str:
 
 # Was: _construct_main_planning_prompt(self, user_prompt:str, history_context:str, nlu_info:str, general_kb_context:str, plan_log_insights:str, feedback_insights_context:str, agent_desc:str) -> str
 def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_info:str,
-                                 general_kb_context:str, kg_derived_context:str, # Added kg_derived_context
+                                 general_kb_context:str, kg_derived_context:str,
+                                 kg_past_plan_summary_context:str, # Added past_plan_summary_context
                                  plan_log_insights:str, feedback_insights_context:str,
                                  agent_desc:str) -> str:
    kb_section = ""
    if general_kb_context.strip(): kb_section += general_kb_context
-   if kg_derived_context.strip(): kb_section += kg_derived_context # Add KG derived context
+   if kg_derived_context.strip(): kb_section += kg_derived_context
+   if kg_past_plan_summary_context.strip(): kb_section += kg_past_plan_summary_context # Add past plan summaries
    if plan_log_insights.strip(): kb_section += plan_log_insights
    if feedback_insights_context.strip(): kb_section += feedback_insights_context
 
    context_usage_instructions = (
        "When creating the plan, consider the following:\n"
        "1. The 'NLU Analysis' provides the primary intent, confidence score, any alternative intents, extracted entities, and potentially implicit user goals for the CURRENT request. Use all these NLU facets to deeply understand the user's needs.\n"
-       "2. 'General Context from Knowledge Base' (semantic search), 'Knowledge Graph Derived Context' (entity/topic links), 'Insights from Past Plan Executions', and 'Feedback Insights' offer background. Learn from past successes, failures, and user feedback.\n" # Updated
-       "3. If 'Extracted Keywords' or 'Extracted Topics' are listed with any KB items (either from semantic or graph search), these can help refine task prompts or agent choices.\n" # Updated
-       "4. Agent 'Complexity' (low, medium, high) and 'Speed' (fast, medium, slow) ratings should guide agent selection. \n"
+       "2. Context from various Knowledge Base sources is provided: 'General Context' (semantic search), 'Knowledge Graph Derived Context' (entity/topic links), 'Past Simplified Plan Structures' (for similar intents), 'Insights from Past Plan Executions' (detailed logs), and 'Feedback Insights'. Use all available context to learn from past successes, failures, and user feedback.\n" # Updated
+       "3. If 'Extracted Keywords' or 'Extracted Topics' are listed with any KB items, these can help refine task prompts or agent choices.\n"
+       "4. Review 'Past Simplified Plan Structures' for similar intents. Note their success/failure, agent sequences, and key entities to inform your current plan. Avoid repeating past failures if possible.\n" # New instruction
+       "5. Agent 'Complexity' (low, medium, high) and 'Speed' (fast, medium, slow) ratings should guide agent selection. \n"
        "   - For simple tasks, favor agents with low complexity.\n"
        "   - For complex tasks, you might need high complexity agents; consider if the task can be broken down, especially if NLU indicates multiple intents or complex implicit goals.\n"
-       "5. The overall 'Request Priority' (e.g., high, normal, low - assume 'normal' if not specified) should influence your choices:\n"
+       "6. The overall 'Request Priority' (e.g., high, normal, low - assume 'normal' if not specified) should influence your choices:\n" # Index updated
        "   - For 'high' priority requests, aim for quicker plans. This might mean choosing agents with 'fast' or 'medium' speed. Address the primary intent and key implicit goals directly.\n"
        "   - For 'low' priority requests, you can afford more thoroughness. Agents with 'slow' speed or higher 'complexity' can be used. Consider exploring alternative intents if NLU suggests them.\n"
        "   - For 'normal' priority, balance speed, complexity, and result quality. Address primary intent and important implicit goals; consider alternatives if primary confidence is low.\n"
-       "6. You may also assign a 'priority' field ('high', 'normal', 'low') to individual steps in your generated plan if you discern differential importance among sub-tasks based on the overall request priority or dependencies.\n"
+       "7. You may also assign a 'priority' field ('high', 'normal', 'low') to individual steps in your generated plan if you discern differential importance among sub-tasks based on the overall request priority or dependencies.\n" # Index updated
    )
 
    return (f"You are the MasterPlanner. Your role is to decompose a complex user request into a sequence of tasks for specialized AI agents.\n\n"
