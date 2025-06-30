@@ -6,6 +6,8 @@ import datetime
 from src.agents.master_orchestrator import TerminusOrchestrator, Agent
 from src.core.kb_schemas import PlanExecutionRecordDC # For type hints if needed
 from src.core.conversation_history import ConversationContextManager, ConversationTurn # For mocking
+from src.core.rl_policy_manager import RLPolicyManager # Import for spec
+from src.core.async_tools import AsyncTask, AsyncTaskStatus # Import for spec
 
 # Minimal Agent definitions for mocking
 mock_planner_agent_def = Agent(name="MasterPlanner", model="ollama/mock-planner", specialty="Planning", active=True)
@@ -34,6 +36,7 @@ def mock_orchestrator() -> TerminusOrchestrator:
 
     orchestrator.tts_engine = MagicMock()
     orchestrator.rl_logger = MagicMock() # Mock RL logger
+    orchestrator.rl_policy_manager = MagicMock(spec=RLPolicyManager) # Add mock for RLPolicyManager
 
     # Ensure necessary agents are present, add if not (e.g. if agents.json is minimal/mocked)
     agent_names_present = [a.name for a in orchestrator.agents]
@@ -461,4 +464,53 @@ class TestExecuteMasterPlan:
         assert "Sync Task 1" in agent_A_call1[0][1] # prompt is args[1] of the first arg tuple
         assert "Async Task 2 using SyncOutput1" in agent_B_call[0][1]
         assert "Sync Task 3 using AsyncDataFromB" in agent_A_call2[0][1]
+
+    async def test_rl_dynamic_strategy_selection_specific_strategy(self, mock_orchestrator: TerminusOrchestrator):
+        mock_orchestrator.rl_policy_manager._construct_state_key.return_value = "state_key_test_rl"
+        mock_orchestrator.rl_policy_manager.get_best_action.return_value = "Strategy_FocusClarity"
+
+        # Minimal plan to trigger the RL logging
+        plan_json = [{"step_id": "1", "agent_name": "AgentA", "task_prompt": "Do something"}]
+        mock_orchestrator._ollama_generate.return_value = {"status": "success", "response": json.dumps(plan_json)}
+        mock_orchestrator.execute_agent.return_value = {"status": "success", "response": "Done"}
+
+        await mock_orchestrator.execute_master_plan("Test RL strategy selection")
+
+        expected_strategies = ["Strategy_Default", "Strategy_FocusClarity", "Strategy_PrioritizeBrevity"]
+        mock_orchestrator.rl_policy_manager.get_best_action.assert_called_once_with("state_key_test_rl", expected_strategies)
+
+        # Check that the selected strategy was logged
+        logged_action = mock_orchestrator.rl_logger.log_experience.call_args[1]['action']
+        assert logged_action == "Strategy_FocusClarity"
+        logged_prompt_details = mock_orchestrator.rl_logger.log_experience.call_args[1]['master_planner_prompt_details']
+        assert logged_prompt_details['strategy_used'] == "Strategy_FocusClarity"
+
+    async def test_rl_dynamic_strategy_selection_get_best_action_returns_none(self, mock_orchestrator: TerminusOrchestrator):
+        mock_orchestrator.rl_policy_manager._construct_state_key.return_value = "state_key_test_rl_none"
+        mock_orchestrator.rl_policy_manager.get_best_action.return_value = None # Simulate no preferred action
+
+        plan_json = [{"step_id": "1", "agent_name": "AgentA", "task_prompt": "Do something"}]
+        mock_orchestrator._ollama_generate.return_value = {"status": "success", "response": json.dumps(plan_json)}
+        mock_orchestrator.execute_agent.return_value = {"status": "success", "response": "Done"}
+
+        await mock_orchestrator.execute_master_plan("Test RL strategy fallback to default")
+
+        logged_action = mock_orchestrator.rl_logger.log_experience.call_args[1]['action']
+        assert logged_action == "Strategy_Default" # Default strategy
+        logged_prompt_details = mock_orchestrator.rl_logger.log_experience.call_args[1]['master_planner_prompt_details']
+        assert logged_prompt_details['strategy_used'] == "Strategy_Default"
+
+    async def test_rl_dynamic_strategy_selection_rl_manager_is_none(self, mock_orchestrator: TerminusOrchestrator):
+        mock_orchestrator.rl_policy_manager = None # Simulate RL manager not being available
+
+        plan_json = [{"step_id": "1", "agent_name": "AgentA", "task_prompt": "Do something"}]
+        mock_orchestrator._ollama_generate.return_value = {"status": "success", "response": json.dumps(plan_json)}
+        mock_orchestrator.execute_agent.return_value = {"status": "success", "response": "Done"}
+
+        await mock_orchestrator.execute_master_plan("Test no RL manager")
+
+        logged_action = mock_orchestrator.rl_logger.log_experience.call_args[1]['action']
+        assert logged_action == "Strategy_Default" # Default strategy
+        logged_prompt_details = mock_orchestrator.rl_logger.log_experience.call_args[1]['master_planner_prompt_details']
+        assert logged_prompt_details['strategy_used'] == "Strategy_Default"
     pass
