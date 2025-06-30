@@ -269,11 +269,16 @@ class TerminusOrchestrator:
        # Initialize RL Policy Manager
        self.rl_policy_storage_path = self.data_dir / "rl_action_preferences.json"
        try:
-           self.rl_policy_manager = RLPolicyManager(policy_storage_path=self.rl_policy_storage_path)
-           print(f"RLPolicyManager initialized. Policy storage: {self.rl_policy_storage_path}")
+           # Pass the orchestrator itself as the event_bus and the path to the log file
+           self.rl_policy_manager = RLPolicyManager(
+               policy_storage_path=self.rl_policy_storage_path,
+               event_bus=self, # The orchestrator instance acts as the event bus provider
+               experience_log_file_path=self.rl_experience_log_path
+           )
+           print(f"RLPolicyManager initialized. Policy storage: {self.rl_policy_storage_path}. Listening for log events.")
        except Exception as e_rl_init:
            self.rl_policy_manager = None
-           print(f"CRITICAL ERROR initializing RLPolicyManager: {e_rl_init}. RL-based strategy selection will be disabled.")
+           print(f"CRITICAL ERROR initializing RLPolicyManager: {e_rl_init}. RL-based strategy selection and event-driven updates will be disabled.")
 
 
    async def _orchestrate_conversation_summarization(self):
@@ -2077,6 +2082,18 @@ class TerminusOrchestrator:
            calculated_reward=calculated_reward, next_state=None, done=True,
            timestamp_start_iso=timestamp_interaction_start, timestamp_end_iso=timestamp_interaction_end
        )
+       # Publish an event indicating a new RL experience has been logged
+       await self.publish_event(
+           event_type="rl.experience.logged",
+           source_component="TerminusOrchestrator.RLLogger", # Or more specific like execute_master_plan
+           payload={
+               "log_file_path": str(self.rl_logger.log_file_path),
+               "rl_interaction_id": rl_interaction_id,
+               "execution_status": final_plan_outcome_status_str
+            }
+       )
+       print(f"[{plan_handler_id}] Published 'rl.experience.logged' event for interaction {rl_interaction_id}.")
+
        if plan_list or not plan_succeeded_this_attempt :
             current_plan_log_kb_id = await self._store_plan_execution_log_in_kb(user_prompt, first_attempt_nlu_output, original_plan_json_str, plan_succeeded_this_attempt, current_attempt + 1, final_exec_results, step_outputs, user_facing_summary)
 

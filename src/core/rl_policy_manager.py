@@ -1,9 +1,16 @@
 import json
 import random
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, TYPE_CHECKING
 from collections import defaultdict
 import datetime
+import asyncio # For creating task in event handler
+
+if TYPE_CHECKING:
+    from src.core.event_system import SystemEvent # For type hinting
+    # from src.agents.master_orchestrator import TerminusOrchestrator # Avoid circular import for type hint
+
+PolicyDataType = Dict[str, Dict[str, Dict[str, Any]]]
 
 # Define a structure for storing action preferences
 # Q[state_key][action_key] = {"total_reward": float, "count": int, "mean_reward": float, "last_updated_iso": str}
@@ -14,22 +21,81 @@ class RLPolicyManager:
     Manages Reinforcement Learning policies, specifically action preferences
     based on states, using a simple value averaging (Q-value like) approach.
     Policies are persisted to a JSON file.
+    Can optionally listen to events to trigger log processing.
     """
-    def __init__(self, policy_storage_path: Path, default_learning_rate: float = 0.1, default_epsilon: float = 0.1):
+    def __init__(self,
+                 policy_storage_path: Path,
+                 default_learning_rate: float = 0.1,
+                 default_epsilon: float = 0.1,
+                 event_bus: Optional[Any] = None, # Accept event_bus, type hint as 'Any' or a Protocol
+                 experience_log_file_path: Optional[Path] = None): # Path to the experience log
         """
         Initializes the RLPolicyManager.
 
         Args:
             policy_storage_path (Path): Path to the JSON file for storing/loading policies.
-            default_learning_rate (float): Default learning rate for updates if not specified.
+            default_learning_rate (float): Default learning rate for updates.
             default_epsilon (float): Default epsilon for epsilon-greedy action selection.
-                                     Probability of choosing a random action (exploration).
+            event_bus (Optional[Any]): An event bus instance that supports a
+                                       `subscribe_to_event(event_type, handler)` method.
+            experience_log_file_path (Optional[Path]): Path to the RL experience log file.
+                                                       Required if event_bus is used for auto-processing.
         """
         self.policy_storage_path = policy_storage_path
         self.default_learning_rate = default_learning_rate
         self.default_epsilon = default_epsilon
         self.action_preferences: PolicyDataType = defaultdict(lambda: defaultdict(lambda: {"total_reward": 0.0, "count": 0, "mean_reward": 0.0}))
+        self.event_bus = event_bus
+        self.experience_log_file_path = experience_log_file_path
+
         self.load_policy()
+
+        if self.event_bus:
+            if self.experience_log_file_path:
+                # Type hint for event parameter within the handler
+                async def typed_handler(event: 'SystemEvent'): # Use string literal for SystemEvent
+                    await self._handle_experience_logged_event(event)
+
+                self.event_bus.subscribe_to_event("rl.experience.logged", typed_handler)
+                print(f"RLPolicyManager: Subscribed to 'rl.experience.logged' events. Will process {self.experience_log_file_path}.")
+            else:
+                print("RLPolicyManager: Warning - Event bus provided but no experience_log_file_path. Cannot auto-process logs via events.")
+
+
+    async def _handle_experience_logged_event(self, event: 'SystemEvent') -> None:
+        """
+        Event handler for 'rl.experience.logged' events.
+        Triggers processing of the configured experience log file.
+        """
+        # The event payload might contain the specific log file path if multiple are used,
+        # or specific interaction_id for targeted processing.
+        # For now, simply re-process the main configured log file.
+        print(f"RLPolicyManager: Received '{event.event_type}' event (ID: {event.event_id}). Triggering experience log processing.")
+        if self.experience_log_file_path:
+            # Run processing in a new task to avoid blocking the event handler if it's called from event loop
+            # process_experience_log is synchronous, so wrap with to_thread if it becomes very long,
+            # or make process_experience_log itself async (more involved).
+            # For now, direct call assuming it's acceptably fast or event loop can handle brief sync call.
+            # If process_experience_log is lengthy and sync, it could block event dispatcher.
+            # A safer approach for long sync tasks from async handlers:
+            # loop = asyncio.get_event_loop()
+            # await loop.run_in_executor(None, self.process_experience_log, self.experience_log_file_path)
+            # For simplicity now, direct call:
+            try:
+                # Create a task to avoid blocking the event dispatcher directly if process_experience_log is sync
+                # and potentially long-running.
+                async def process_log_task():
+                    print(f"RLPolicyManager: Starting background task to process log: {self.experience_log_file_path}")
+                    self.process_experience_log(self.experience_log_file_path) # Assuming default LR
+                    print(f"RLPolicyManager: Background task for log processing completed.")
+
+                asyncio.create_task(process_log_task())
+
+            except Exception as e:
+                print(f"RLPolicyManager: Error while trying to process experience log from event: {e}")
+        else:
+            print("RLPolicyManager: Warning - _handle_experience_logged_event called but no experience_log_file_path configured.")
+
 
     def load_policy(self) -> None:
         """
