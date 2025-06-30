@@ -46,6 +46,7 @@ from ..core.async_tools import AsyncTask, AsyncTaskStatus
 from ..core.event_system import SystemEvent
 from ..core.conversation_history import ConversationTurn, ConversationContextManager
 from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC # New KB Schema Imports
+from ..core.knowledge_graph import KnowledgeGraph # Import KnowledgeGraph
 
 
 # --- New/Modified Dataclasses for Service Definitions ---
@@ -254,6 +255,16 @@ class TerminusOrchestrator:
        self.rl_experience_log_path = self.logs_dir / "rl_experience_log.jsonl"
        self.rl_logger = RLExperienceLogger(self.rl_experience_log_path)
        print(f"RL Experience Logger initialized. Logging to: {self.rl_experience_log_path}")
+
+       # Initialize Knowledge Graph
+       self.knowledge_graph_db_path = self.data_dir / "terminus_graph.db"
+       try:
+           self.kg_instance = KnowledgeGraph(db_path=self.knowledge_graph_db_path)
+           print(f"KnowledgeGraph instance initialized with DB at: {self.knowledge_graph_db_path}")
+       except Exception as e_kg:
+           self.kg_instance = None
+           print(f"CRITICAL ERROR initializing KnowledgeGraph: {e_kg}. Graph features will be unavailable.")
+
 
    async def _orchestrate_conversation_summarization(self):
         """
@@ -710,13 +721,35 @@ class TerminusOrchestrator:
                if extracted_topics: new_meta["extracted_topics"] = extracted_topics
 
                print(f"{handler_id} INFO: Attempting metadata update for KB '{kb_id}' with keywords: '{extracted_keywords}', topics: '{extracted_topics}'.")
-               update_status = await self._update_kb_item_metadata(kb_id, new_meta) # Make sure this is awaited
+               update_status = await self._update_kb_item_metadata(kb_id, new_meta)
                if update_status.get("status") == "success":
                    print(f"{handler_id} SUCCESS: Metadata update for KB '{kb_id}' successful.")
+                   # Also update Knowledge Graph with keywords and topics
+                   if self.kg_instance:
+                       # Ensure KB item node exists
+                       self.kg_instance.add_node(node_id=kb_id, node_type=db_schema_type or "GenericContent", content_preview=text_for_analysis[:100])
+
+                       if extracted_keywords:
+                           for kw in extracted_keywords.split(','):
+                               kw_clean = kw.strip().lower()
+                               if kw_clean:
+                                   kw_node_id = f"keyword_{kw_clean.replace(' ', '_')}"
+                                   self.kg_instance.add_node(node_id=kw_node_id, node_type="Keyword", content_preview=kw_clean)
+                                   self.kg_instance.add_edge(source_node_id=kb_id, target_node_id=kw_node_id, relationship_type="HAS_KEYWORD", ensure_nodes=False)
+                           print(f"{handler_id} INFO: Added/Updated keyword relationships in KG for KB ID '{kb_id}'.")
+
+                       if extracted_topics:
+                           for topic in extracted_topics.split(','):
+                               topic_clean = topic.strip().lower()
+                               if topic_clean:
+                                   topic_node_id = f"topic_{topic_clean.replace(' ', '_')}"
+                                   self.kg_instance.add_node(node_id=topic_node_id, node_type="Topic", content_preview=topic_clean)
+                                   self.kg_instance.add_edge(source_node_id=kb_id, target_node_id=topic_node_id, relationship_type="HAS_TOPIC", ensure_nodes=False)
+                           print(f"{handler_id} INFO: Added/Updated topic relationships in KG for KB ID '{kb_id}'.")
                else:
                    print(f"{handler_id} ERROR: Metadata update for KB '{kb_id}' failed. Msg: {update_status.get('message')}")
            else:
-               print(f"{handler_id} INFO: No keywords or topics extracted for KB '{kb_id}'. No metadata update.")
+               print(f"{handler_id} INFO: No keywords or topics extracted for KB '{kb_id}'. No metadata update, no KG keyword/topic edges added.")
        except Exception as e:
            print(f"{handler_id} UNHANDLED ERROR in content analysis handler for KB '{kb_id}': {type(e).__name__}: {e}")
        finally:
@@ -1264,7 +1297,35 @@ class TerminusOrchestrator:
                 # source_component="FeedbackAnalyzerSystem",
                 #     payload={"report_id": kb_meta.get('report_id'), "kb_id": store_res.get("id")}
                 # )
-               return {"status":"success", "message":msg, "kb_id":store_res.get("id")}
+               # Add FeedbackReport node to Knowledge Graph and link if possible
+               stored_kb_report_id = store_res.get("id")
+               if self.kg_instance and stored_kb_report_id:
+                   self.kg_instance.add_node(
+                       node_id=stored_kb_report_id,
+                       node_type="FeedbackReport",
+                       content_preview=f"Report ID: {kb_meta.get('report_id')}, Overall Sentiment: {report_data.get('overall_sentiment_distribution',{}).get('positive',0)*100:.0f}% positive",
+                       metadata={"report_id": kb_meta.get('report_id'), "generation_timestamp_iso": report_data.get("report_generation_timestamp_iso")}
+                   )
+                   print(f"{report_handler_id} SUCCESS: Added/Updated FeedbackReport node '{stored_kb_report_id}' in Knowledge Graph.")
+
+                   # Conceptual: Attempt to link to a PlanExecutionRecord if item_id from feedback implies it.
+                   # This requires feedback_log.jsonl to contain item_ids that are plan_log_kb_ids
+                   # and feedback_analyzer.py to potentially aggregate feedback per item_id and include this
+                   # 'source_item_id_for_feedback' in its report_data.
+                   source_item_id_for_feedback = report_data.get("source_item_id_for_feedback_aggregation")
+                   if source_item_id_for_feedback:
+                       # Ensure the source item (e.g., a PlanLog) node exists or is created as a placeholder
+                       # self.kg_instance.add_node(source_item_id_for_feedback, "UnknownSourceItem", content_preview="Source of feedback", ensure_nodes=True) # This would be ensure_nodes=True on add_edge
+
+                       # Edge from FeedbackReport to the item it analyzes
+                       self.kg_instance.add_edge(stored_kb_report_id, source_item_id_for_feedback,
+                                                 "ANALYZES_FEEDBACK_FOR", ensure_nodes=True)
+                       # Edge from the item to the FeedbackReport
+                       self.kg_instance.add_edge(source_item_id_for_feedback, stored_kb_report_id,
+                                                 "HAS_FEEDBACK_ANALYZED_IN", ensure_nodes=True)
+                       print(f"{report_handler_id} INFO: Linked FeedbackReport '{stored_kb_report_id}' to source item '{source_item_id_for_feedback}' in KG.")
+
+               return {"status":"success", "message":msg, "kb_id":stored_kb_report_id}
             else:
                 print(f"{report_handler_id} ERROR: Failed to store report in KB. Msg: {store_res.get('message')}")
                 return store_res
@@ -1982,6 +2043,20 @@ class TerminusOrchestrator:
            # "primary_intent": nlu_analysis_data.get("intent", "N/A")
            #     }
            # )
+            # Add PlanLog node to Knowledge Graph
+           if self.kg_instance and stored_kb_id:
+               self.kg_instance.add_node(
+                   node_id=stored_kb_id, # Should be same as plan_record.record_id
+                   node_type="PlanExecutionRecord",
+                   content_preview=user_facing_summary_text[:150],
+                   metadata={"status": final_plan_status_str, "intent": plan_record.primary_intent}
+               )
+               print(f"MasterPlanner: Added/Updated PlanExecutionRecord node '{stored_kb_id}' in Knowledge Graph.")
+               # Conceptual: Link to UserRequest node if UserRequests were stored as nodes
+               # user_request_node_id = f"user_request_{hash(user_prompt_orig)}" # Example ID
+               # self.kg_instance.add_node(user_request_node_id, "UserRequest", user_prompt_orig[:100])
+               # self.kg_instance.add_edge(stored_kb_id, user_request_node_id, "GENERATED_FROM_REQUEST", ensure_nodes=True)
+
            return stored_kb_id
        else:
            print(f"MasterPlanner: Plan log storage failed. Message: {store_result.get('message')}")
