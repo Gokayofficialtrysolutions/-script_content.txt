@@ -184,4 +184,105 @@ class TestRLPolicyManagerProcessExperienceLog:
             state_key_F, "ActionX", 1.0, learning_rate=custom_lr
         )
 
+@pytest.mark.asyncio
+class TestRLPolicyManagerEventHandling:
+
+    def test_init_subscribes_to_event_if_bus_and_path_provided(self, temp_policy_file: Path, temp_log_file: Path):
+        mock_event_bus = MagicMock()
+        mock_event_bus.subscribe_to_event = MagicMock() # Ensure it has the method
+
+        # Instantiate RLPolicyManager with the mock event bus and a log file path
+        manager = RLPolicyManager(
+            policy_storage_path=temp_policy_file,
+            event_bus=mock_event_bus,
+            experience_log_file_path=temp_log_file
+        )
+
+        mock_event_bus.subscribe_to_event.assert_called_once()
+        args, _ = mock_event_bus.subscribe_to_event.call_args
+        assert args[0] == "rl.experience.logged"
+        # Check that the handler is the correct bound method. This is a bit tricky.
+        # We can check if it's a callable and its __self__ is the manager instance.
+        assert callable(args[1])
+        assert getattr(args[1], '__self__', None) == manager
+        # More specific: assert args[1] == manager._handle_experience_logged_event
+        # but this requires knowing the exact method name and it might be bound differently.
+        # A common way is to check its name if it's not a lambda or partial.
+        assert args[1].__name__ == 'typed_handler' # It's the wrapper
+        # To check the wrapped method, it's more involved. For unit test, checking it's a bound method of manager is good.
+
+
+    def test_init_does_not_subscribe_if_event_bus_missing(self, temp_policy_file: Path, temp_log_file: Path):
+        manager = RLPolicyManager(
+            policy_storage_path=temp_policy_file,
+            event_bus=None, # No event bus
+            experience_log_file_path=temp_log_file
+        )
+        # If event_bus was a mock, we'd assert not_called. Here, we just ensure no error.
+        assert manager.event_bus is None
+
+    def test_init_does_not_subscribe_if_log_path_missing(self, temp_policy_file: Path):
+        mock_event_bus = MagicMock()
+        mock_event_bus.subscribe_to_event = MagicMock()
+
+        manager = RLPolicyManager(
+            policy_storage_path=temp_policy_file,
+            event_bus=mock_event_bus,
+            experience_log_file_path=None # No log path
+        )
+        mock_event_bus.subscribe_to_event.assert_not_called()
+        assert manager.experience_log_file_path is None
+
+
+    async def test_handle_experience_logged_event_calls_process_log(self, temp_policy_file: Path, temp_log_file: Path):
+        mock_event_bus = MagicMock() # Not used for subscription check here, direct handler call
+        manager = RLPolicyManager(
+            policy_storage_path=temp_policy_file,
+            event_bus=None, # Don't subscribe for this direct handler test
+            experience_log_file_path=temp_log_file # Must be provided for handler to work
+        )
+
+        # Mock the method that would be called by the handler's task
+        manager.process_experience_log = MagicMock(return_value=1)
+
+        # Mock asyncio.create_task to immediately execute the coroutine (or just run the inner part)
+        # For simplicity in this unit test, we'll patch process_experience_log and assume create_task works.
+        # The goal is to test that _handle_experience_logged_event *tries* to call process_experience_log.
+
+        mock_event = MagicMock(spec=SystemEvent)
+        mock_event.event_type = "rl.experience.logged"
+        mock_event.event_id = "test_event_id_123"
+        mock_event.payload = {"log_file_path": str(temp_log_file)} # Example payload
+
+        # Patch asyncio.create_task to verify it's called with a coroutine
+        # that eventually calls process_experience_log
+        with patch('asyncio.create_task') as mock_create_task:
+            # Define a side effect for create_task that immediately executes the passed coroutine
+            async def immediate_execute_task(coro, *args, **kwargs):
+                await coro # Execute the coroutine passed to create_task
+                return MagicMock() # Return a mock task object
+
+            mock_create_task.side_effect = immediate_execute_task
+
+            await manager._handle_experience_logged_event(mock_event)
+
+        mock_create_task.assert_called_once() # Ensure it tried to create a task
+        manager.process_experience_log.assert_called_once_with(temp_log_file)
+
+
+    async def test_handle_experience_logged_event_no_log_path(self, temp_policy_file: Path):
+        manager = RLPolicyManager(
+            policy_storage_path=temp_policy_file,
+            experience_log_file_path=None # Crucial: no log path configured
+        )
+        manager.process_experience_log = MagicMock()
+
+        mock_event = MagicMock(spec=SystemEvent)
+
+        with patch('builtins.print') as mock_print: # Capture print warnings
+            await manager._handle_experience_logged_event(mock_event)
+
+        manager.process_experience_log.assert_not_called()
+        assert any("Warning - _handle_experience_logged_event called but no experience_log_file_path configured" in str(c) for c in mock_print.call_args_list)
+```
 ```
