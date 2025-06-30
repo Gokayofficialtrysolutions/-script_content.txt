@@ -2082,10 +2082,11 @@ class TerminusOrchestrator:
            calculated_reward=calculated_reward, next_state=None, done=True,
            timestamp_start_iso=timestamp_interaction_start, timestamp_end_iso=timestamp_interaction_end
        )
-       # Publish an event indicating a new RL experience has been logged
+       # Publish an event to notify listeners (like RLPolicyManager) that a new RL experience has been logged
+       # and policy updates might be needed.
        await self.publish_event(
            event_type="rl.experience.logged",
-           source_component="TerminusOrchestrator.RLLogger", # Or more specific like execute_master_plan
+           source_component="TerminusOrchestrator.RLLogger",
            payload={
                "log_file_path": str(self.rl_logger.log_file_path),
                "rl_interaction_id": rl_interaction_id,

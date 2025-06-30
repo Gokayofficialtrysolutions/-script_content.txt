@@ -186,7 +186,10 @@ class TestRLPolicyManagerProcessExperienceLog:
 
 @pytest.mark.asyncio
 class TestRLPolicyManagerEventHandling:
-
+    """
+    Tests the event subscription and handling capabilities of RLPolicyManager,
+    specifically its reaction to 'rl.experience.logged' events.
+    """
     def test_init_subscribes_to_event_if_bus_and_path_provided(self, temp_policy_file: Path, temp_log_file: Path):
         mock_event_bus = MagicMock()
         mock_event_bus.subscribe_to_event = MagicMock() # Ensure it has the method

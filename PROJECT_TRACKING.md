@@ -67,7 +67,7 @@
     *   [X] Explicit user feedback mechanisms (ratings, corrections) - *UI widgets for feedback integrated across relevant UI outputs.*
     *   [X] System analyzes feedback to generate summary reports, stored in KB.
     *   [X] MasterPlanner actively uses feedback reports from KB for plan adaptation.
-    *   [P] RL frameworks for adjusting behavior, prompts, tool selection - *`RLPolicyManager` implemented (load/save policies, update preferences via log processing, epsilon-greedy action selection). MasterPlanner now uses RL to select conceptual prompting strategies, and these strategies result in differentiated prompt content for the planner LLM. Logging supports this learning loop.*
+    *   [P] RL frameworks for adjusting behavior, prompts, tool selection - *`RLPolicyManager` implemented (load/save policies, update preferences via log processing triggered by events, epsilon-greedy action selection). MasterPlanner now uses RL to select conceptual prompting strategies which result in differentiated prompt content for the planner LLM. Logging supports this learning loop.*
 *   [X] **Knowledge Ingestion & Synthesis:** (Agent-driven ingestion, reactive analysis, planner utilization)
     *   [X] Autonomous ingestion from documents/links - *WebCrawler, DocumentProcessor, CodeMaster store outputs in KB.*
     *   [X] Reactive analysis of new KB content (keyword extraction, topic modeling) triggered via message bus.
@@ -127,5 +127,5 @@
 *   [ ] Ethical Alignment & User Control
 *   [ ] Performance Optimization & Efficiency
 *   [ ] Dependency Management & Upgradability
-*   [P] Comprehensive Testing & Validation - *Test framework setup with Pytest. Extensive unit tests for: KnowledgeGraph, core TerminusOrchestrator (classify_user_intent, _evaluate_plan_condition, ChromaDB interactions, Event Bus/handlers), execute_master_plan (failures, retries, revisions, async steps), RLPolicyManager (log processing), RL integration for strategy selection, and strategy-aware prompt construction (`construct_main_planning_prompt`).*
+*   [P] Comprehensive Testing & Validation - *Test framework setup with Pytest. Extensive unit tests for: KnowledgeGraph; core TerminusOrchestrator (classify_user_intent, _evaluate_plan_condition, ChromaDB interactions, Event Bus/handlers, async task management); execute_master_plan (failures, retries, revisions, async steps); RLPolicyManager (log processing, event handling); RL integration for strategy selection; and strategy-aware prompt construction (`construct_main_planning_prompt`).*
 *   [ ] Documentation & Community

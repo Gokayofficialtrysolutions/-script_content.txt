@@ -278,7 +278,11 @@ class TestOrchestratorEvaluatePlanCondition:
 
 @pytest.mark.asyncio
 class TestOrchestratorAsyncTaskManagement:
-
+    """
+    Tests for the TerminusOrchestrator's asynchronous task management system,
+    including submitting tasks, tracking their lifecycle (via _async_task_wrapper),
+    retrieving task information, and task cancellation.
+    """
     async def test_submit_async_task_registers_and_starts(self, orchestrator_instance: TerminusOrchestrator):
         dummy_coro_mock = AsyncMock(return_value="dummy_success") # A coroutine that can be awaited
 
