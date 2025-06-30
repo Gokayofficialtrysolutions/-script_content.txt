@@ -75,7 +75,28 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
                                  kg_past_plan_summary_context:str,
                                  plan_log_insights:str, feedback_insights_context:str,
                                  agent_desc:str,
-                                 planner_strategy: Optional[str] = "Strategy_Default") -> str: # Added planner_strategy
+                                 planner_strategy: Optional[str] = "Strategy_Default") -> str:
+   """
+   Constructs the main, detailed prompt for the MasterPlanner LLM to generate an execution plan.
+
+   Args:
+       user_prompt: The current user's request.
+       history_context: Formatted string of relevant conversation history.
+       nlu_info: Formatted string of NLU analysis for the current request.
+       general_kb_context: Context retrieved from ChromaDB based on semantic search.
+       kg_derived_context: Context retrieved from Knowledge Graph based on entity/topic links.
+       kg_past_plan_summary_context: Summaries of past simplified plans from KG for similar intents.
+       plan_log_insights: Formatted insights from past detailed plan execution logs (ChromaDB).
+       feedback_insights_context: Formatted insights from user feedback analysis reports (ChromaDB).
+       agent_desc: Description of available agents and their capabilities.
+       planner_strategy: The conceptual strategy to guide LLM's planning approach.
+                         Expected values: "Strategy_Default", "Strategy_FocusClarity",
+                                          "Strategy_PrioritizeBrevity".
+                         Modifies instructional text within the prompt.
+
+   Returns:
+       A string prompt for the MasterPlanner LLM.
+   """
    kb_section = ""
    if general_kb_context.strip(): kb_section += general_kb_context
    if kg_derived_context.strip(): kb_section += kg_derived_context
@@ -93,12 +114,14 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
            "clearer alternative exists, even if it means a few more simple steps.\n"
        )
    elif planner_strategy == "Strategy_PrioritizeBrevity":
+       # Apply Brevity-focused instructions
        strategy_specific_instructions = (
            "\n--- CURRENT PLANNING STRATEGY: PRIORITIZE BREVITY ---\n"
            "Your primary goal for this plan is BREVITY and EFFICIENCY. Aim for the minimum number of steps required to achieve the user's core request. "
            "Prefer direct approaches and simpler agent interactions. Task prompts for agents should be concise. Only include essential dependencies.\n"
        )
-   # Default strategy has no extra specific instructions beyond the general ones.
+   # If planner_strategy is "Strategy_Default" or unknown, strategy_specific_instructions remains empty,
+   # and the LLM relies on the standard context_usage_instructions and overall task.
 
    context_usage_instructions = (
        "When creating the plan, consider the following:\n"
