@@ -465,6 +465,30 @@ class TestExecuteMasterPlan:
         assert "Async Task 2 using SyncOutput1" in agent_B_call[0][1]
         assert "Sync Task 3 using AsyncDataFromB" in agent_A_call2[0][1]
 
+    @patch('src.core.prompt_constructors.construct_main_planning_prompt')
+    async def test_rl_strategy_influences_prompt_content(self, mock_construct_prompt: MagicMock, mock_orchestrator: TerminusOrchestrator):
+        # 1. Configure mocks
+        chosen_strategy = "Strategy_FocusClarity"
+        mock_orchestrator.rl_policy_manager._construct_state_key.return_value = "a_state_key"
+        mock_orchestrator.rl_policy_manager.get_best_action.return_value = chosen_strategy
+
+        # Mock the actual prompt constructor to capture its args
+        mock_construct_prompt.return_value = "Mocked planning prompt content" # Needs to return a string
+
+        # Minimal plan to let execute_master_plan run through prompt construction
+        minimal_plan_json = [{"step_id": "noop", "agent_name": "AgentA", "task_prompt": "noop"}]
+        mock_orchestrator._ollama_generate.return_value = {"status": "success", "response": json.dumps(minimal_plan_json)}
+        mock_orchestrator.execute_agent.return_value = {"status": "success", "response": "noop_done"}
+
+        # 2. Run the method
+        await mock_orchestrator.execute_master_plan("test prompt for strategy influence")
+
+        # 3. Assert that construct_main_planning_prompt was called with the chosen strategy
+        mock_construct_prompt.assert_called_once()
+        call_args_kwargs = mock_construct_prompt.call_args[1] # kwargs
+        assert call_args_kwargs.get("planner_strategy") == chosen_strategy
+
+
     async def test_rl_dynamic_strategy_selection_specific_strategy(self, mock_orchestrator: TerminusOrchestrator):
         mock_orchestrator.rl_policy_manager._construct_state_key.return_value = "state_key_test_rl"
         mock_orchestrator.rl_policy_manager.get_best_action.return_value = "Strategy_FocusClarity"
