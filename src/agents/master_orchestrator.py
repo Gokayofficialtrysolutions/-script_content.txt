@@ -45,7 +45,7 @@ from ..core.rl_logger import RLExperienceLogger
 from ..core.async_tools import AsyncTask, AsyncTaskStatus
 from ..core.event_system import SystemEvent
 from ..core.conversation_history import ConversationTurn, ConversationContextManager
-from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC # New KB Schema Imports
+from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC, GenericDocumentDC # New KB Schema Imports
 from ..core.knowledge_graph import KnowledgeGraph # Import KnowledgeGraph
 from ..core.rl_policy_manager import RLPolicyManager # Import RLPolicyManager
 from ..nlu_processing.nlu_engine import NLUProcessor, NLUProcessingError # Import NLUProcessor
@@ -678,6 +678,17 @@ class TerminusOrchestrator:
                except Exception as e_scrape_parse:
                    print(f"{handler_id} WARNING: Could not parse WebServiceScrapeResult for KB ID '{kb_id}'. Using raw JSON string. Error: {e_scrape_parse}")
                    text_for_analysis = doc_json_string # Fallback
+           elif db_schema_type == "GenericDocument":
+               try:
+                   gen_doc = GenericDocumentDC.from_json_string(doc_json_string)
+                   # Primarily analyze the summary, but could also include a snippet of original if desired.
+                   text_for_analysis = f"Source: {gen_doc.source_identifier}\nSummary: {gen_doc.summary_content}"
+                   if gen_doc.original_content and len(gen_doc.original_content) < 2000: # Only add short original content
+                       text_for_analysis += f"\nOriginal Content Snippet: {gen_doc.original_content[:200]}..."
+                   print(f"{handler_id} INFO: Extracted text from GenericDocument (summary and optional original snippet) for analysis.")
+               except Exception as e_gendoc_parse:
+                   print(f"{handler_id} WARNING: Could not parse GenericDocument for KB ID '{kb_id}'. Using raw JSON string. Error: {e_gendoc_parse}")
+                   text_for_analysis = doc_json_string # Fallback
            elif db_schema_type == "CodeExplanation": # Code explanations might be better served by their own keywords
                 print(f"{handler_id} INFO: Skipping generic keyword/topic analysis for CodeExplanation schema '{db_schema_type}'. Assumed to have its own keywords.")
                 return
@@ -1300,6 +1311,7 @@ class TerminusOrchestrator:
                             "PlanExecutionRecord": PlanExecutionRecordDC,
                             "CodeExplanation": CodeExplanationDC,
                             "WebServiceScrapeResult": WebServiceScrapeResultDC,
+                            "GenericDocument": GenericDocumentDC,
                             # Add other schema types here as they are defined
                         }
                         TargetClass = schema_class_map.get(schema_type)
@@ -2726,5 +2738,125 @@ class TerminusOrchestrator:
    async def generate_code_module(self, requirements: str, language: Optional[str] = "python", filename: Optional[str] = None) -> Dict: return {"status": "info", "message": "generate_code_module not fully shown"}
    async def get_system_info(self, component: str) -> Dict: return {"status": "info", "message": "get_system_info not fully shown"}
    async def parallel_execution(self, prompt: str, selected_agents_names: List[str], context: Optional[Dict]=None) -> List[Dict]: return [{"status":"info", "message":"parallel_execution not fully shown"}]
+
+   async def _service_docprocessor_process_and_store(self, params: Dict, service_definition: AgentServiceDefinition) -> Dict:
+        """
+        Service handler for DocProcessor's 'process_and_store_document' service.
+        Summarizes document text, stores it as GenericDocumentDC in KB, and returns KB ID.
+        """
+        log_prefix = f"[{self.__class__.__name__}._service_docprocessor_process_and_store]"
+        document_text = params.get("document_text")
+        source_identifier = params.get("source_identifier")
+        summarization_instructions = params.get("summarization_instructions") # Optional
+
+        if not document_text or not isinstance(document_text, str) or not document_text.strip():
+            return {"status": "error", "data": None, "message": "Missing or empty 'document_text' parameter.", "error_code": "MISSING_PARAMETER_DOCUMENT_TEXT"}
+        if not source_identifier or not isinstance(source_identifier, str) or not source_identifier.strip():
+            return {"status": "error", "data": None, "message": "Missing or empty 'source_identifier' parameter.", "error_code": "MISSING_PARAMETER_SOURCE_ID"}
+
+        summarizer_agent = next((a for a in self.agents if a.name == "DocSummarizer" and a.active), None)
+        if not summarizer_agent:
+            return {"status": "error", "data": None, "message": "DocSummarizer agent not available for summarization.", "error_code": "AGENT_UNAVAILABLE_DOCSUMMARIZER"}
+
+        # Construct prompt for DocSummarizer
+        max_input_length = 15000 # Consistent with _service_docsummarizer_summarize_text
+        summary_prompt = f"Please provide a concise summary of the following text from source '{source_identifier}'.\n"
+        if summarization_instructions:
+            summary_prompt += f"Follow these instructions for summarization: {summarization_instructions}\n"
+        summary_prompt += f"\nTEXT TO SUMMARIZE:\n```\n{document_text[:max_input_length]}\n```\n\nCONCISE SUMMARY:"
+
+        print(f"{log_prefix} Calling DocSummarizer. Text length: {len(document_text)} (truncated to {max_input_length} for prompt), Source: '{source_identifier}'.")
+
+        # Use the existing direct service call logic if DocSummarizer.summarize_text has a direct handler
+        # This avoids creating a new async task if the underlying service can handle it.
+        # However, DocSummarizer.summarize_text itself calls execute_agent which creates an async task.
+        # So, we will call execute_agent directly here to manage the async task lifecycle properly for this service.
+
+        summarization_llm_call_or_task = await self.execute_agent(summarizer_agent, summary_prompt)
+
+        summary_text: Optional[str] = None
+
+        if summarization_llm_call_or_task.get("status") == "pending_async":
+            task_id = summarization_llm_call_or_task["task_id"]
+            print(f"{log_prefix} Summarization task {task_id} submitted for document '{source_identifier}'. Awaiting result...")
+
+            # This service handler needs to await the result of its own async sub-task.
+            # The _handle_agent_service_call method expects this handler to return the final result,
+            # or propagate 'pending_async' if the handler itself wants to be non-blocking (which is not the case here, we need the summary).
+            while True:
+                await asyncio.sleep(0.2) # Poll interval
+                task_info = await self.get_async_task_info(task_id)
+                if not task_info:
+                    msg = f"Summarization LLM task {task_id} info not found for document '{source_identifier}'."
+                    print(f"{log_prefix} ERROR: {msg}")
+                    return {"status": "error", "data": None, "message": msg, "error_code": "ASYNC_TASK_NOT_FOUND_SUMMARY"}
+
+                if task_info.status == AsyncTaskStatus.COMPLETED:
+                    if task_info.result and task_info.result.get("status") == "success":
+                        summary_text = task_info.result.get("response")
+                        print(f"{log_prefix} Summarization LLM task {task_id} for '{source_identifier}' completed. Summary length: {len(summary_text) if summary_text else 0}")
+                    else:
+                        msg = f"Summarization LLM task {task_id} for '{source_identifier}' completed but failed or no response: {task_info.result}"
+                        print(f"{log_prefix} ERROR: {msg}")
+                        return {"status": "error", "data": None, "message": msg, "error_code": "LLM_SUMMARY_TASK_FAILED_OR_EMPTY"}
+                    break
+                elif task_info.status == AsyncTaskStatus.FAILED:
+                    msg = f"Summarization LLM task {task_id} for '{source_identifier}' failed: {task_info.error}"
+                    print(f"{log_prefix} ERROR: {msg}")
+                    return {"status": "error", "data": None, "message": msg, "error_code": "LLM_SUMMARY_TASK_FAILED"}
+                elif task_info.status == AsyncTaskStatus.CANCELLED:
+                    msg = f"Summarization LLM task {task_id} for '{source_identifier}' was cancelled."
+                    print(f"{log_prefix} WARN: {msg}") # Treat as error for this service's purpose
+                    return {"status": "error", "data": None, "message": msg, "error_code": "LLM_SUMMARY_TASK_CANCELLED"}
+
+        elif summarization_llm_call_or_task.get("status") == "success": # Synchronous success from execute_agent (less likely for LLM)
+            summary_text = summarization_llm_call_or_task.get("response")
+            print(f"{log_prefix} Summarization for '{source_identifier}' completed synchronously (unexpected for LLM). Summary length: {len(summary_text) if summary_text else 0}")
+        else: # Synchronous error from execute_agent
+            error_msg = summarization_llm_call_or_task.get("response", f"Unknown error during summarization agent call for '{source_identifier}'.")
+            print(f"{log_prefix} ERROR: Summarization agent call for '{source_identifier}' failed (sync path): {error_msg}")
+            return {"status": "error", "data": None, "message": error_msg, "error_code": "LLM_SUMMARY_CALL_FAILED_SYNC"}
+
+        if not summary_text or not summary_text.strip():
+            msg = f"Summarization for document '{source_identifier}' resulted in an empty summary."
+            print(f"{log_prefix} ERROR: {msg}")
+            return {"status": "error", "data": None, "message": msg, "error_code": "EMPTY_SUMMARY_GENERATED"}
+
+        # Create GenericDocumentDC instance
+        doc_processor_agent_name = service_definition.name.split('.')[0] # Infer from service name "DocProcessor.process..."
+
+        generic_doc_record = GenericDocumentDC(
+            source_identifier=source_identifier,
+            original_content=document_text,
+            summary_content=summary_text,
+            processing_notes=f"Summarized with instructions: '{summarization_instructions}'" if summarization_instructions else "Standard summarization.",
+            source_agent_name=doc_processor_agent_name # The agent providing this service
+        )
+
+        print(f"{log_prefix} Storing GenericDocument for '{source_identifier}' in KB. Record ID: {generic_doc_record.record_id}")
+        store_result = await self.store_knowledge(
+            structured_content=generic_doc_record,
+            schema_type="GenericDocument", # Explicitly state schema type
+            metadata={ # Basic metadata for top-level filtering
+                "source": "doc_processor_service",
+                "doc_source_id": source_identifier[:100], # Truncate for safety as metadata value
+                "agent_responsible": doc_processor_agent_name
+            },
+            content_id=generic_doc_record.record_id
+        )
+
+        if store_result.get("status") == "success":
+            kb_id = store_result.get("id")
+            success_msg = f"Document '{source_identifier}' processed, summarized, and stored in KB. KB ID: {kb_id}"
+            print(f"{log_prefix} SUCCESS: {success_msg}")
+            return {
+                "status": "success",
+                "data": {"kb_id": kb_id, "summary_preview": summary_text[:150] + "..."},
+                "message": success_msg
+            }
+        else:
+            error_msg = f"Failed to store processed document '{source_identifier}' in KB. Error: {store_result.get('message')}"
+            print(f"{log_prefix} ERROR: {error_msg}")
+            return {"status": "error", "data": None, "message": error_msg, "error_code": "KB_STORE_FAILED_GENERIC_DOC"}
 
 orchestrator = TerminusOrchestrator()

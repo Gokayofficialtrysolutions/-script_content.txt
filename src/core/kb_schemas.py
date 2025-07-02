@@ -125,6 +125,27 @@ class SimplifiedPlanStructureDC(BaseKBSchema):
     # If custom logic is needed (e.g. for nested dataclasses not handled by base), override it.
     # For now, assuming base is okay.
 
+@dataclass
+class GenericDocumentDC(BaseKBSchema):
+    """
+    Dataclass for storing generic document content and its summary.
+    Useful for user-uploaded documents or other text not fitting specific schemas.
+    """
+    record_id: str = field(default_factory=lambda: f"gendoc_{uuid.uuid4()}")
+    chroma_db_id: Optional[str] = None # Populated by orchestrator after storage if needed
+    timestamp_utc: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    source_identifier: str # e.g., filename, URL, or user-provided description
+    original_content: str # The full original text content
+    summary_content: str  # The summarized version of the original_content
+    original_content_hash: Optional[str] = None # Optional: SHA256 hash of original_content
+    processing_notes: Optional[str] = None # Any notes from the agent that processed/summarized this
+    source_agent_name: Optional[str] = None # e.g., "DocProcessor" or "UserUploadHandler"
+
+    def __post_init__(self):
+        if self.original_content and not self.original_content_hash:
+            import hashlib
+            self.original_content_hash = hashlib.sha256(self.original_content.encode('utf-8')).hexdigest()
+
 if __name__ == '__main__':
     print("--- Testing PlanExecutionRecordDC ---")
     plan_rec = PlanExecutionRecordDC(

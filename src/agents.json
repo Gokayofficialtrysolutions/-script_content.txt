@@ -147,7 +147,23 @@
     "specialty": "Document Analysis & Generation (potentially more comprehensive than summarization)",
     "active": true,
     "estimated_complexity": "high",
-    "estimated_speed": "slow"
+    "estimated_speed": "slow",
+    "provided_services": [
+      {
+        "name": "process_and_store_document",
+        "description": "Summarizes a given document text, stores the original and summary in the Knowledge Base as a GenericDocument, and returns the KB ID.",
+        "parameters": [
+          {"name": "document_text", "type": "string", "required": true, "description": "The full text content of the document to process."},
+          {"name": "source_identifier", "type": "string", "required": true, "description": "An identifier for the document's origin (e.g., filename, URL)."},
+          {"name": "summarization_instructions", "type": "string", "required": false, "description": "Optional instructions for the summarization process (e.g., 'focus on financial aspects', 'provide a short executive summary')."}
+        ],
+        "returns": {
+          "type": "dict",
+          "description": "A dictionary containing the 'kb_id' of the stored GenericDocument record and a 'message'."
+        },
+        "handler_method_name": "_service_docprocessor_process_and_store"
+      }
+    ]
   },
   {
     "name": "VisionAI",
