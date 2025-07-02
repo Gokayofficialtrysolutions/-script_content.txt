@@ -1,0 +1,83 @@
+[
+  {
+    "command_name": "CREATE_FILE",
+    "intent_aliases": ["CREATE_FILE_INTENT", "MAKE_FILE", "NEW_FILE"],
+    "patterns": [
+      [
+        {"LOWER": {"IN": ["create", "make", "generate", "new"]}},
+        {"LOWER": {"IN": ["a", "an", "the"]}, "OP": "?"},
+        {"LOWER": "file", "OP": "?"},
+        {"LOWER": "named", "OP": "?"},
+        {"ENT_TYPE": {"IN": ["FILE_PATH", "FILENAME", "PRODUCT"]}, "OP": "+", "CAPTURE": "file_path"}
+      ],
+      [
+        {"LOWER": {"IN": ["create", "make"]}},
+        {"ENT_TYPE": {"IN": ["FILE_PATH", "FILENAME", "PRODUCT"]}, "CAPTURE": "file_path"},
+        {"LOWER": "file", "OP": "?"}
+      ]
+    ],
+    "entity_mapping": {
+      "file_path": "target_path"
+    },
+    "default_params": {}
+  },
+  {
+    "command_name": "RUN_AGENT_ON_FILE",
+    "intent_aliases": ["PROCESS_FILE_WITH_AGENT", "AGENT_ACTION_FILE"],
+    "patterns": [
+      [
+        {"LOWER": {"IN": ["run", "execute", "use", "apply"]}},
+        {"ENT_TYPE": "AGENT_NAME", "CAPTURE": "agent_name"},
+        {"LOWER": "on"},
+        {"ENT_TYPE": {"IN": ["FILE_PATH", "FILENAME"]}, "CAPTURE": "target_file"},
+        {"LOWER": "to", "OP": "?"},
+        {"LOWER": {"REGEX": "\\w+"}, "OP": "*", "CAPTURE": "action_description"}
+      ]
+    ],
+    "entity_mapping": {
+      "agent_name": "agent_name",
+      "target_file": "file_path",
+      "action_description": "task_details"
+    },
+    "default_params": {}
+  },
+  {
+    "command_name": "SUMMARIZE_TEXT_COMMAND",
+    "intent_aliases": ["SUMMARIZE_TEXT_INTENT"],
+    "patterns": [
+      [
+        {"LOWER": {"IN": ["summarize", "give", "provide"]}},
+        {"LOWER": {"IN": ["me", "a"]}, "OP": "?"},
+        {"LOWER": "summary"},
+        {"LOWER": "of", "OP": "?"},
+        {"LOWER": "this", "OP": "?"},
+        {"LOWER": "text", "OP": "?"},
+        {"IS_PUNCT": True, "OP": "?"},
+        {"TEXT": {"REGEX": ".+"}, "OP": "+", "CAPTURE": "text_to_summarize"}
+      ],
+      [
+        {"LOWER": "summarize"},
+        {"ENT_TYPE": "TEXT_BLOCK", "CAPTURE": "text_to_summarize"}
+      ]
+    ],
+    "entity_mapping": {
+      "text_to_summarize": "text_content"
+    },
+    "default_params": {}
+  },
+  {
+    "command_name": "WEB_SEARCH_COMMAND",
+    "intent_aliases": ["SEARCH_THE_WEB", "FIND_INFO_ONLINE"],
+    "patterns": [
+      [
+        {"LOWER": {"IN": ["search", "find", "look up"]}},
+        {"LOWER": {"IN": ["for", "online for", "on the web for"]}, "OP": "?"},
+        {"LOWER": {"REGEX": ".+"}, "OP": "+", "CAPTURE": "search_query"}
+      ]
+    ],
+    "entity_mapping": {
+      "search_query": "query"
+    },
+    "default_params": {}
+  }
+]

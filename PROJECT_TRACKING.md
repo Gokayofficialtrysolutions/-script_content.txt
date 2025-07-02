@@ -52,10 +52,10 @@
     *   [X] Complex Plan Execution (parallel, conditional, looping/retry) - *Initial retry and parallel execution implemented.*
     *   [P] Dynamic Plan Adaptation & Learning - *Initial targeted revision context and learning from feedback reports implemented. Topic utilization from KB, and retrieval of simplified past plan structures from KG also enhance adaptation and learning.*
     *   [P] Resource-Aware & Prioritized Planning - *Agent `estimated_speed` added; MasterPlanner prompt updated for speed, complexity, and request priority.*
-*   [X] **Sophisticated Intent Understanding & Contextual Awareness:** (Initial NLU enhancements implemented)
-    *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *Enhanced with NER, alternative intent suggestion, implicit goal extraction; MasterPlanner KB pre-query leverages this. MasterPlanner prompt updated for richer NLU.*
-    *   [ ] Dedicated NLU module/agent
-    *   [ ] Richer contextual model of interaction & user objectives
+*   [X] **Sophisticated Intent Understanding & Contextual Awareness:** (Initial NLU enhancements implemented, Dedicated NLU Module Phase 1 & 2 complete)
+    *   [X] Nuanced NLU (ambiguity, implicit goals, long-term context) - *Base capabilities established via NLUAnalysisAgent and further enhanced by dedicated NLU module.*
+    *   [X] Dedicated NLU module/agent - *Implemented `NLUProcessor` with spaCy and Hugging Face Transformers. Provides intent recognition, entity extraction, sentiment analysis, and rule-based command parsing. Integrated with MasterPlanner.*
+    *   [P] Richer contextual model of interaction & user objectives - *Partially addressed by NLU module providing better structured input. Further work needed for long-term context and deeper objective tracking.*
 
 ### Phase Y: System Learning, Memory & Adaptation
 *Key Objectives:*

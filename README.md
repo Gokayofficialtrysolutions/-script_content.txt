@@ -18,7 +18,10 @@ Terminalis AGI is a comprehensive, locally runnable AI ecosystem designed for po
         *   Utilizes an expanding Knowledge Base to inform planning:
             *   Semantic vector search (ChromaDB) for general contextual documents.
             *   Knowledge Graph (SQLite) for relationships between KB items, entities, topics, and for retrieving summaries of past relevant plans.
-        *   Enhanced NLU for deeper request understanding (alternative intents, implicit goals).
+        *   **Advanced NLU Module:**
+            *   Provides robust intent recognition, entity extraction, and sentiment analysis.
+            *   Features rule-based command parsing for structured user inputs, allowing for more direct action interpretation.
+            *   NLU results (intent, entities, parsed commands) enrich the context for `MasterPlanner`.
         *   Considers agent complexity, speed, and request priority in planning.
         *   Internal mechanism to suggest new tools/capabilities if a request cannot be fulfilled.
         *   Adaptive planning strategy selection (experimental) using Reinforcement Learning to improve effectiveness over time.

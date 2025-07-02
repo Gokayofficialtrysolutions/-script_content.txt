@@ -48,6 +48,9 @@ from ..core.conversation_history import ConversationTurn, ConversationContextMan
 from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC # New KB Schema Imports
 from ..core.knowledge_graph import KnowledgeGraph # Import KnowledgeGraph
 from ..core.rl_policy_manager import RLPolicyManager # Import RLPolicyManager
+from ..nlu_processing.nlu_engine import NLUProcessor, NLUProcessingError # Import NLUProcessor
+from ..nlu_processing.nlu_config import nlu_default_config # Import default NLU config
+from ..nlu_processing.nlu_results import NLUResult # Import NLUResult for type hinting
 
 
 # --- New/Modified Dataclasses for Service Definitions ---
@@ -280,6 +283,17 @@ class TerminusOrchestrator:
            self.rl_policy_manager = None
            print(f"CRITICAL ERROR initializing RLPolicyManager: {e_rl_init}. RL-based strategy selection and event-driven updates will be disabled.")
 
+       # Initialize NLU Processor
+       try:
+           self.nlu_processor = NLUProcessor(config=nlu_default_config) # Using default config for now
+           print("NLUProcessor initialized successfully.")
+       except NLUProcessingError as e_nlu_init:
+           self.nlu_processor = None
+           print(f"CRITICAL ERROR initializing NLUProcessor: {e_nlu_init}. NLU features will be unavailable.")
+           # Optionally, re-raise or handle more gracefully depending on how critical NLU is at startup
+       except Exception as e_nlu_generic:
+            self.nlu_processor = None
+            print(f"CRITICAL UNEXPECTED ERROR initializing NLUProcessor: {e_nlu_generic}. NLU features will be unavailable.")
 
    async def _orchestrate_conversation_summarization(self):
         """
@@ -1524,12 +1538,27 @@ class TerminusOrchestrator:
 
        print(f"{plan_handler_id} START: Received request. RL Interaction ID: {rl_interaction_id}")
 
+       # --- Perform NLU analysis on the user prompt ---
+       nlu_result_for_plan: Optional[NLUResult] = None
+       if self.nlu_processor:
+           try:
+               nlu_result_for_plan = self.nlu_processor.process_text(user_prompt) # This is a synchronous call
+               print(f"{plan_handler_id} INFO: NLU processing complete. Intent: {nlu_result_for_plan.detected_intent.name if nlu_result_for_plan.detected_intent else 'N/A'}, Entities: {len(nlu_result_for_plan.entities)}")
+               # Store NLU result in conversation history metadata for the user turn
+               user_turn_metadata = {"nlu_result": nlu_result_for_plan.dict()} # Store as dict
+           except Exception as e_nlu_proc:
+               print(f"{plan_handler_id} WARNING: NLU processing failed during planning: {e_nlu_proc}")
+               user_turn_metadata = {"nlu_processing_error": str(e_nlu_proc)}
+       else:
+           print(f"{plan_handler_id} WARNING: NLUProcessor not available. Proceeding without NLU analysis for this request.")
+           user_turn_metadata = {"nlu_status": "unavailable"}
+
        # Add current user prompt to history as a ConversationTurn object
        # Extract keywords for the new user turn.
        user_prompt_keywords = self.conversation_context_manager.extract_keywords_from_text(user_prompt)
-       user_turn = ConversationTurn(role="user", content=user_prompt, keywords=user_prompt_keywords)
+       user_turn = ConversationTurn(role="user", content=user_prompt, keywords=user_prompt_keywords, metadata=user_turn_metadata)
        self.conversation_history.append(user_turn)
-       print(f"{plan_handler_id} INFO: Extracted keywords from user prompt: {user_prompt_keywords}")
+       # print(f"{plan_handler_id} INFO: Extracted keywords from user prompt: {user_prompt_keywords}") # Already logged by NLU if available
 
        # Prune overall history if it exceeds max_history_items (simple FIFO for overall limit)
        if len(self.conversation_history) > self.max_history_items:
@@ -1547,17 +1576,59 @@ class TerminusOrchestrator:
        max_rev_attempts = 1; current_attempt = 0; plan_list = []; original_plan_json_str = ""
        final_exec_results = []
        step_outputs = {}
-       first_attempt_nlu_output = {}
+       first_attempt_nlu_output = {} # This will store the NLU result for the first planning attempt
        detailed_failure_ctx_for_rev = {}
        current_plan_log_kb_id = None
        state_for_executed_plan_log: Optional[Dict] = None
        action_for_executed_plan_log: Optional[str] = None
        prompt_details_for_executed_plan_log: Optional[Dict] = None
 
-       print(f"{plan_handler_id} INFO: Performing NLU analysis for initial planning.")
-       first_attempt_nlu_output = await self.classify_user_intent(user_prompt)
-       nlu_summary_for_prompt = f"NLU Analysis :: Intent: {first_attempt_nlu_output.get('intent','N/A')} :: Entities: {str(first_attempt_nlu_output.get('entities',[]))[:100]}..."
-       print(f"{plan_handler_id} INFO: {nlu_summary_for_prompt}")
+       # Use the NLU result obtained earlier if available
+       if nlu_result_for_plan:
+            # Convert NLUResult object to a dictionary format similar to what classify_user_intent (legacy) produced
+            # This ensures `first_attempt_nlu_output` has a consistent structure for downstream use.
+            first_attempt_nlu_output = {
+                "status": "success", # Assuming success if we have an NLUResult object
+                "intent": nlu_result_for_plan.detected_intent.name if nlu_result_for_plan.detected_intent else "unknown_intent",
+                "intent_score": nlu_result_for_plan.detected_intent.confidence if nlu_result_for_plan.detected_intent else 0.0,
+                "alternative_intents": [
+                    {"intent": alt_name, "score": alt_score} # Use tuple directly
+                    for alt_name, alt_score in (nlu_result_for_plan.detected_intent.alternate_intents or [])
+                ] if nlu_result_for_plan.detected_intent else [],
+                "entities": [ent.dict() for ent in nlu_result_for_plan.entities],
+                "parsed_command": nlu_result_for_plan.parsed_command.dict() if nlu_result_for_plan.parsed_command else None, # Add parsed command
+                "implicit_goals": None, # Placeholder
+                "message": "NLU analysis via NLUProcessor successful."
+            }
+
+            # Construct a richer NLU summary for the planning prompt
+            nlu_intent_str = first_attempt_nlu_output.get('intent','N/A')
+            nlu_score_str = f"{first_attempt_nlu_output.get('intent_score', 0.0):.2f}"
+            nlu_entities_list = [e.get('text') for e in first_attempt_nlu_output.get('entities',[])]
+            nlu_entities_str = str(nlu_entities_list)[:100] if nlu_entities_list else "None"
+
+            nlu_summary_for_prompt = f"NLU Analysis (NLUProcessor) :: Intent: {nlu_intent_str} (Score: {nlu_score_str}) :: Entities: {nlu_entities_str}"
+
+            if first_attempt_nlu_output.get("parsed_command"):
+                cmd = first_attempt_nlu_output["parsed_command"]["command"]
+                cmd_params = first_attempt_nlu_output["parsed_command"]["parameters"]
+                nlu_summary_for_prompt += f" :: Parsed Command: {cmd} (Params: {str(cmd_params)[:100]})"
+            else:
+                nlu_summary_for_prompt += " :: Parsed Command: None"
+
+            print(f"{plan_handler_id} INFO: Using NLU result from NLUProcessor: {nlu_summary_for_prompt}")
+       else:
+            # Fallback to old NLU method if new one failed or is unavailable
+            print(f"{plan_handler_id} INFO: NLUProcessor result not available. Falling back to legacy NLU analysis for initial planning.")
+            first_attempt_nlu_output = await self.classify_user_intent(user_prompt) # Legacy NLU call
+            nlu_summary_for_prompt = f"NLU Analysis (Legacy) :: Intent: {first_attempt_nlu_output.get('intent','N/A')} :: Entities: {str(first_attempt_nlu_output.get('entities',[]))[:100]}..."
+            if first_attempt_nlu_output.get("parsed_command"): # Should not happen with legacy, but good for consistency
+                cmd = first_attempt_nlu_output["parsed_command"]["command"]
+                cmd_params = first_attempt_nlu_output["parsed_command"]["parameters"]
+                nlu_summary_for_prompt += f" :: Parsed Command: {cmd} (Params: {str(cmd_params)[:100]})"
+
+            print(f"{plan_handler_id} INFO: Using legacy NLU result: {nlu_summary_for_prompt}")
+
 
        while current_attempt <= max_rev_attempts:
            current_attempt_results = [] # Stores results of completed steps for this attempt
@@ -2458,22 +2529,57 @@ class TerminusOrchestrator:
             # For other agent types not explicitly handled as async yet
             return {"status": "error", "agent": agent.name, "model": agent.model, "response": f"Execution logic for agent {agent.name} not specifically defined for async or direct execution."}
 
-   async def classify_user_intent(self, user_prompt: str) -> Dict: # This method calls execute_agent
+   async def classify_user_intent(self, user_prompt: str) -> Dict: # This method calls execute_agent OR self.nlu_processor
+        # This method now serves as a fallback or an alternative NLU path if self.nlu_processor is not used directly in execute_master_plan
+        # For direct NLUProcessor use in execute_master_plan, this method might become primarily legacy.
+        # However, if it's still called, we can choose to route to NLUProcessor here too.
+
+        # Option 1: Prioritize NLUProcessor if available and this method is called
+        if self.nlu_processor:
+            print("[classify_user_intent] INFO: Routing to NLUProcessor from within classify_user_intent.")
+            try:
+                nlu_result = self.nlu_processor.process_text(user_prompt)
+                # Adapt nlu_result (NLUResult object) to the Dict structure expected by legacy callers
+               # This includes adding 'parsed_command' if available.
+                return {
+                    "status": "success",
+                    "intent": nlu_result.detected_intent.name if nlu_result.detected_intent else "unknown_intent",
+                    "intent_score": nlu_result.detected_intent.confidence if nlu_result.detected_intent else 0.0,
+                    "alternative_intents": [
+                       {"intent": alt_name, "score": alt_score}
+                       for alt_name, alt_score in (nlu_result.detected_intent.alternate_intents or [])
+                    ] if nlu_result.detected_intent else [],
+                    "entities": [ent.dict() for ent in nlu_result.entities],
+                   "parsed_command": nlu_result.parsed_command.dict() if nlu_result.parsed_command else None, # Add parsed command
+                    "implicit_goals": None, # NLUProcessor currently doesn't extract this.
+                    "message": "NLU analysis via NLUProcessor (called from classify_user_intent)."
+                }
+            except Exception as e:
+                print(f"[classify_user_intent] ERROR: NLUProcessor failed when called from classify_user_intent: {e}")
+                # Fall through to legacy agent-based NLU if NLUProcessor fails here
+
+        # Option 2: Legacy agent-based NLU (if NLUProcessor is None or failed above)
+        print("[classify_user_intent] INFO: Using legacy NLUAnalysisAgent.")
         nlu_agent = next((a for a in self.agents if a.name == "NLUAnalysisAgent" and a.active), None)
-        if not nlu_agent: return {"status": "error", "message": "NLUAnalysisAgent not found or inactive.", "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
+        if not nlu_agent:
+           return {"status": "error", "message": "NLUAnalysisAgent not found or inactive (legacy path).", "intent": None, "entities": [], "parsed_command": None, "implicit_goals": None, "alternative_intents": []}
+
         candidate_labels_str = ", ".join([f"'{label}'" for label in self.candidate_intent_labels])
+       # Update prompt for legacy agent to also try to identify commands if possible (though less reliable than rule-based)
         nlu_prompt = (
             f"Analyze the following user prompt: '{user_prompt}'\n\n"
             f"1. Intent Classification: Classify the primary intent against candidate labels: [{candidate_labels_str}]. Provide the top intent and its confidence score (0.0-1.0).\n"
             f"2. Alternative Intents: If confidence for primary intent is below 0.85 OR the request seems ambiguous/multi-faceted, list up to 2 alternative intents with their scores.\n"
             f"3. Named Entity Recognition: Extract relevant named entities (names, locations, dates, organizations, products, filenames, URLs, specific technical terms).\n"
-            f"4. Implicit Goals/Desired Outcomes: Briefly describe any underlying goals or desired outcomes the user might have, even if not explicitly stated (e.g., 'User wants to solve a problem quickly', 'User is exploring options for a project'). If none, state 'None'.\n\n"
+           f"4. Command Parsing (Experimental): If the prompt seems like a direct command (e.g., 'create file X', 'run agent Y on Z'), attempt to identify a 'command_name' (e.g., 'CREATE_FILE', 'RUN_AGENT') and 'parameters' (as a dictionary). If not a clear command, set 'command_name' to null.\n"
+           f"5. Implicit Goals/Desired Outcomes: Briefly describe any underlying goals or desired outcomes the user might have, even if not explicitly stated. If none, state 'None'.\n\n"
             f"Return your analysis as a single, minified JSON object with this exact structure:\n"
             f"{{\"intent\": \"<detected_intent_label>\", \"intent_score\": <float_score_0_to_1>, "
-            f"\"alternative_intents\": [{{ \"intent\": \"<alt_intent_label>\", \"score\": <float_score_0_to_1> }}], " # List of objects
+           f"\"alternative_intents\": [{{ \"intent\": \"<alt_intent_label>\", \"score\": <float_score_0_to_1> }}], "
             f"\"entities\": [{{ \"text\": \"<entity_text>\", \"type\": \"<ENTITY_TYPE_UPPERCASE>\", \"score\": <float_score_0_to_1> }}], "
+           f"\"parsed_command\": {{ \"command_name\": \"<command_or_null>\", \"parameters\": {{ \"param1\": \"value1\" }} }}, " # Added parsed_command
             f"\"implicit_goals\": \"<text_description_or_None>\"}}\n"
-            f"Ensure scores are floats. If no alternatives/entities, use empty lists. If primary intent is unclear, use 'unknown_intent'."
+           f"Ensure scores are floats. If no alternatives/entities/command parameters, use empty lists/objects. If primary intent is unclear, use 'unknown_intent'."
         )
         raw_nlu_result_or_task = await self.execute_agent(nlu_agent, nlu_prompt)
 
@@ -2482,26 +2588,26 @@ class TerminusOrchestrator:
             task_id = raw_nlu_result_or_task["task_id"]
             print(f"[classify_user_intent] NLU analysis submitted as task {task_id}. Awaiting result...")
             while True:
-                await asyncio.sleep(0.1) # Quick poll for potentially fast NLU
+               await asyncio.sleep(0.1)
                 task_info = await self.get_async_task_info(task_id)
                 if not task_info:
-                    return {"status": "error", "message": f"NLU task {task_id} info not found.", "intent": None, "entities": []}
+                   return {"status": "error", "message": f"NLU task {task_id} info not found.", "intent": None, "entities": [], "parsed_command": None}
 
                 if task_info.status == AsyncTaskStatus.COMPLETED:
                     if not isinstance(task_info.result, dict) or "status" not in task_info.result:
-                         return {"status": "error", "message": f"NLU task {task_id} completed with unexpected result format: {type(task_info.result)}.", "intent": None, "entities": []}
+                        return {"status": "error", "message": f"NLU task {task_id} completed with unexpected result format: {type(task_info.result)}.", "intent": None, "entities": [], "parsed_command": None}
                     raw_nlu_result = task_info.result
                     print(f"[classify_user_intent] NLU task {task_id} completed.")
                     break
                 elif task_info.status == AsyncTaskStatus.FAILED:
-                    return {"status": "error", "message": f"NLU analysis task {task_id} failed: {task_info.error}", "intent": None, "entities": []}
+                   return {"status": "error", "message": f"NLU analysis task {task_id} failed: {task_info.error}", "intent": None, "entities": [], "parsed_command": None}
                 elif task_info.status == AsyncTaskStatus.CANCELLED:
-                    return {"status": "error", "message": f"NLU analysis task {task_id} was cancelled.", "intent": None, "entities": []}
+                   return {"status": "error", "message": f"NLU analysis task {task_id} was cancelled.", "intent": None, "entities": [], "parsed_command": None}
         else:
             raw_nlu_result = raw_nlu_result_or_task
 
         if raw_nlu_result.get("status") != "success":
-            return {"status": "error", "message": f"NLUAnalysisAgent call failed: {raw_nlu_result.get('response')}", "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
+           return {"status": "error", "message": f"NLUAnalysisAgent call failed: {raw_nlu_result.get('response')}", "intent": None, "entities": [], "parsed_command": None, "implicit_goals": None, "alternative_intents": []}
 
         try:
             parsed_response = json.loads(raw_nlu_result.get("response", "{}"))
@@ -2509,31 +2615,40 @@ class TerminusOrchestrator:
             intent_score = parsed_response.get("intent_score", 0.0)
             entities = parsed_response.get("entities", [])
             if not isinstance(entities, list): entities = []
+
+           parsed_command_data = parsed_response.get("parsed_command")
+           final_parsed_command = None
+           if isinstance(parsed_command_data, dict) and parsed_command_data.get("command_name"):
+               final_parsed_command = {
+                   "command": parsed_command_data.get("command_name"),
+                   "parameters": parsed_command_data.get("parameters", {})
+               }
+
             alternative_intents = parsed_response.get("alternative_intents", [])
             if not isinstance(alternative_intents, list): alternative_intents = []
             implicit_goals = parsed_response.get("implicit_goals")
             if isinstance(implicit_goals, str) and implicit_goals.lower() == 'none': implicit_goals = None
 
-            intent_scores = {intent: intent_score} if intent != "unknown_intent" else {}
-            # Add alternative intent scores to the main scores dict if needed, or keep separate
-            for alt_intent_obj in alternative_intents:
-                if isinstance(alt_intent_obj, dict) and "intent" in alt_intent_obj and "score" in alt_intent_obj:
-                    intent_scores[alt_intent_obj["intent"]] = intent_scores.get(alt_intent_obj["intent"], 0.0) + alt_intent_obj["score"] # Could sum or take max
+           # This was for intent_scores, which isn't standard in NLUResult, so removing for now.
+           # intent_scores = {intent: intent_score} if intent != "unknown_intent" else {}
+           # for alt_intent_obj in alternative_intents:
+           #     if isinstance(alt_intent_obj, dict) and "intent" in alt_intent_obj and "score" in alt_intent_obj:
+           #         intent_scores[alt_intent_obj["intent"]] = intent_scores.get(alt_intent_obj["intent"], 0.0) + alt_intent_obj["score"]
 
             return {
                 "status": "success",
                 "intent": intent,
-                "intent_score": intent_score, # Primary intent score
-                "intent_scores": intent_scores, # Combined scores (optional, or just use primary + alternatives separately)
+               "intent_score": intent_score,
                 "alternative_intents": alternative_intents,
                 "entities": entities,
+               "parsed_command": final_parsed_command, # Include parsed command from legacy agent
                 "implicit_goals": implicit_goals,
-                "message": "NLU analysis via agent successful."
+               "message": "NLU analysis via legacy agent successful."
             }
         except json.JSONDecodeError:
-            return {"status": "error", "message": "NLUAnalysisAgent returned invalid JSON.", "raw_response": raw_nlu_result.get("response"), "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
+           return {"status": "error", "message": "NLUAnalysisAgent returned invalid JSON.", "raw_response": raw_nlu_result.get("response"), "intent": None, "entities": [], "parsed_command": None, "implicit_goals": None, "alternative_intents": []}
         except Exception as e:
-            return {"status": "error", "message": f"Error processing NLU agent response: {str(e)}", "intent": None, "entities": [], "implicit_goals": None, "alternative_intents": []}
+           return {"status": "error", "message": f"Error processing NLU agent response: {str(e)}", "intent": None, "entities": [], "parsed_command": None, "implicit_goals": None, "alternative_intents": []}
 
    async def extract_document_content(self, uploaded_file_object: Any, original_filename: str) -> Dict[str, Any]:
         content_text = ""; status = "error"; message = "File type not supported or error during processing."; file_ext = Path(original_filename).suffix.lower().strip('.')
