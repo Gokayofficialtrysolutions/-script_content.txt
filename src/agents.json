@@ -5,7 +5,52 @@
     "specialty": "Complex task decomposition, planning, and orchestration. Uses NLU, KB context (including topics & feedback), and conversation history to generate multi-step execution plans for other agents.",
     "active": true,
     "estimated_complexity": "high",
-    "estimated_speed": "slow"
+    "estimated_speed": "slow",
+    "provided_services": [
+      {
+        "name": "add_user_objective",
+        "description": "Adds a new long-term user objective to the system.",
+        "parameters": [
+          {"name": "user_identifier", "type": "string", "required": true, "description": "Identifier for the user/session."},
+          {"name": "description", "type": "string", "required": true, "description": "Textual description of the objective."},
+          {"name": "priority", "type": "integer", "required": false, "description": "Priority of the objective (e.g., 1-High, 5-Low).", "default_value": 3},
+          {"name": "related_project_id", "type": "string", "required": false, "description": "Optional ID of a project this objective relates to."},
+          {"name": "key_details", "type": "dict", "required": false, "description": "Optional dictionary for additional structured details."}
+        ],
+        "returns": {
+          "type": "dict",
+          "description": "A dictionary containing the 'objective_id' of the newly created objective and a status message."
+        },
+        "handler_method_name": "_service_masterplanner_add_user_objective"
+      },
+      {
+        "name": "list_user_objectives",
+        "description": "Lists user objectives, optionally filtered by status.",
+        "parameters": [
+          {"name": "user_identifier", "type": "string", "required": true, "description": "Identifier for the user/session."},
+          {"name": "status_filter", "type": "string", "required": false, "description": "Filter objectives by status (e.g., 'active', 'completed'). Default lists all.", "default_value": null}
+        ],
+        "returns": {
+          "type": "list",
+          "description": "A list of dictionaries, each representing a user objective."
+        },
+        "handler_method_name": "_service_masterplanner_list_user_objectives"
+      },
+      {
+        "name": "set_user_objective_status",
+        "description": "Updates the status of an existing user objective.",
+        "parameters": [
+          {"name": "user_identifier", "type": "string", "required": true, "description": "Identifier for the user/session (for validation)."},
+          {"name": "objective_id", "type": "string", "required": true, "description": "The ID of the objective to update."},
+          {"name": "new_status", "type": "string", "required": true, "description": "The new status for the objective (e.g., 'active', 'completed', 'on_hold')."}
+        ],
+        "returns": {
+          "type": "dict",
+          "description": "A dictionary containing a success/failure message."
+        },
+        "handler_method_name": "_service_masterplanner_set_user_objective_status"
+      }
+    ]
   },
   {
     "name": "ContentAnalysisAgent",

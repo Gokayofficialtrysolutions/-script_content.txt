@@ -45,7 +45,7 @@ from ..core.rl_logger import RLExperienceLogger
 from ..core.async_tools import AsyncTask, AsyncTaskStatus
 from ..core.event_system import SystemEvent
 from ..core.conversation_history import ConversationTurn, ConversationContextManager
-from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC, GenericDocumentDC # New KB Schema Imports
+from ..core.kb_schemas import BaseKBSchema, PlanExecutionRecordDC, CodeExplanationDC, WebServiceScrapeResultDC, GenericDocumentDC, UserObjectiveDC # New KB Schema Imports
 from ..core.knowledge_graph import KnowledgeGraph # Import KnowledgeGraph
 from ..core.rl_policy_manager import RLPolicyManager # Import RLPolicyManager
 from ..nlu_processing.nlu_engine import NLUProcessor, NLUProcessingError # Import NLUProcessor
@@ -689,6 +689,18 @@ class TerminusOrchestrator:
                except Exception as e_gendoc_parse:
                    print(f"{handler_id} WARNING: Could not parse GenericDocument for KB ID '{kb_id}'. Using raw JSON string. Error: {e_gendoc_parse}")
                    text_for_analysis = doc_json_string # Fallback
+           elif db_schema_type == "UserObjective":
+               try:
+                   objective_rec = UserObjectiveDC.from_json_string(doc_json_string)
+                   text_for_analysis = f"User Objective: {objective_rec.description}"
+                   if objective_rec.key_details:
+                       details_str = ", ".join([f"{k}: {v}" for k, v in objective_rec.key_details.items() if isinstance(v, (str, int, float))])
+                       if details_str:
+                           text_for_analysis += f"\nKey Details: {details_str}"
+                   print(f"{handler_id} INFO: Extracted text from UserObjective for analysis: '{text_for_analysis[:100]}...'")
+               except Exception as e_obj_parse:
+                   print(f"{handler_id} WARNING: Could not parse UserObjective for KB ID '{kb_id}'. Using raw JSON string. Error: {e_obj_parse}")
+                   text_for_analysis = doc_json_string # Fallback
            elif db_schema_type == "CodeExplanation": # Code explanations might be better served by their own keywords
                 print(f"{handler_id} INFO: Skipping generic keyword/topic analysis for CodeExplanation schema '{db_schema_type}'. Assumed to have its own keywords.")
                 return
@@ -1312,6 +1324,7 @@ class TerminusOrchestrator:
                             "CodeExplanation": CodeExplanationDC,
                             "WebServiceScrapeResult": WebServiceScrapeResultDC,
                             "GenericDocument": GenericDocumentDC,
+                            "UserObjective": UserObjectiveDC,
                             # Add other schema types here as they are defined
                         }
                         TargetClass = schema_class_map.get(schema_type)
@@ -1835,9 +1848,38 @@ class TerminusOrchestrator:
                 action_for_executed_plan_log = current_rl_action
                 prompt_details_for_executed_plan_log = current_prompt_details
 
+           # --- Retrieve and Format Active User Objectives ---
+           active_objectives_string = "No specific long-term objectives are currently active."
+           # TODO: Replace "default_user" with actual user_identifier when available
+           current_user_id_for_objectives = "default_user"
+           try:
+               objectives_result = await self._service_masterplanner_list_user_objectives(
+                   params={"user_identifier": current_user_id_for_objectives, "status_filter": "active"},
+                   service_definition=None # Service definition not strictly needed by handler if params are correct
+               )
+               if objectives_result.get("status") == "success" and objectives_result.get("data"):
+                   active_objectives = objectives_result["data"]
+                   # Sort by priority (lower number is higher priority) and take top 3
+                   # The list_user_objectives service already sorts by priority.
+                   formatted_objectives = []
+                   for i, obj_dict in enumerate(active_objectives[:3]): # Take top 3
+                       # obj_dc = UserObjectiveDC.from_dict(obj_dict) # Already dicts from service
+                       # formatted_objectives.append(f"  - ID: {obj_dc.objective_id}, Prio: {obj_dc.priority}: {obj_dc.description[:100]}...")
+                       desc_preview = obj_dict.get('description', 'N/A')[:100]
+                       prio = obj_dict.get('priority', 'N/A')
+                       formatted_objectives.append(f"  - Prio {prio}: {desc_preview}...")
+                   if formatted_objectives:
+                       active_objectives_string = "Active Long-Term User Objectives (Consider these for overall direction):\n" + "\n".join(formatted_objectives)
+                   print(f"{plan_handler_id} INFO: Retrieved {len(active_objectives)} active objectives for user '{current_user_id_for_objectives}'. Formatted for prompt: {active_objectives_string}")
+               else:
+                   print(f"{plan_handler_id} INFO: No active objectives found or error retrieving for user '{current_user_id_for_objectives}'. Error: {objectives_result.get('message')}")
+           except Exception as e_obj_retrieve:
+               print(f"{plan_handler_id} EXCEPTION retrieving objectives: {e_obj_retrieve}")
+
+
            if current_attempt == 0:
                # The actual planning prompt construction happens here.
-               # Pass the selected_strategy to the prompt constructor.
+               # Pass the selected_strategy and active_objectives_string to the prompt constructor.
                planning_prompt = prompt_constructors.construct_main_planning_prompt(
                    user_prompt=user_prompt,
                    history_context=history_context_string,
@@ -1848,7 +1890,8 @@ class TerminusOrchestrator:
                    kb_plan_log_context=kb_plan_log_ctx_str,
                    kb_feedback_context=kb_feedback_ctx_str,
                    agent_capabilities_description=agent_capabilities_desc,
-                   planner_strategy=selected_strategy # Pass the chosen strategy
+                   planner_strategy=selected_strategy,
+                   active_objectives_string=active_objectives_string # New parameter
                )
            else: # Constructing a revision prompt
                print(f"{plan_handler_id} INFO: Constructing revision prompt with failure context.")
@@ -2858,5 +2901,168 @@ class TerminusOrchestrator:
             error_msg = f"Failed to store processed document '{source_identifier}' in KB. Error: {store_result.get('message')}"
             print(f"{log_prefix} ERROR: {error_msg}")
             return {"status": "error", "data": None, "message": error_msg, "error_code": "KB_STORE_FAILED_GENERIC_DOC"}
+
+   async def _service_masterplanner_add_user_objective(self, params: Dict, service_definition: AgentServiceDefinition) -> Dict:
+        log_prefix = f"[{self.__class__.__name__}._service_masterplanner_add_user_objective]"
+        user_identifier = params.get("user_identifier")
+        description = params.get("description")
+        priority = params.get("priority", 3) # Default from service definition or here
+        related_project_id = params.get("related_project_id")
+        key_details = params.get("key_details")
+
+        if not user_identifier or not description:
+            return {"status": "error", "data": None, "message": "Missing user_identifier or description for objective.", "error_code": "MISSING_OBJECTIVE_PARAMS"}
+
+        objective_record = UserObjectiveDC(
+            user_identifier=str(user_identifier),
+            description=str(description),
+            status="active", # New objectives are active by default
+            priority=int(priority),
+            related_project_id=str(related_project_id) if related_project_id else None,
+            key_details=key_details if isinstance(key_details, dict) else {}
+        )
+
+        store_result = await self.store_knowledge(
+            structured_content=objective_record,
+            schema_type="UserObjective",
+            metadata={ # For direct ChromaDB filtering
+                "source": "user_objective_service",
+                "user_identifier": objective_record.user_identifier,
+                "status": objective_record.status,
+                "priority": objective_record.priority
+            },
+            content_id=objective_record.objective_id
+        )
+
+        if store_result.get("status") == "success":
+            msg = f"User objective '{description[:50]}...' added with ID {objective_record.objective_id} for user '{user_identifier}'."
+            print(f"{log_prefix} SUCCESS: {msg}")
+            return {"status": "success", "data": {"objective_id": objective_record.objective_id}, "message": msg}
+        else:
+            err_msg = f"Failed to store user objective for user '{user_identifier}'. Error: {store_result.get('message')}"
+            print(f"{log_prefix} ERROR: {err_msg}")
+            return {"status": "error", "data": None, "message": err_msg, "error_code": "KB_STORE_FAILED_USER_OBJECTIVE"}
+
+   async def _service_masterplanner_list_user_objectives(self, params: Dict, service_definition: AgentServiceDefinition) -> Dict:
+        log_prefix = f"[{self.__class__.__name__}._service_masterplanner_list_user_objectives]"
+        user_identifier = params.get("user_identifier")
+        status_filter = params.get("status_filter")
+
+        if not user_identifier:
+            return {"status": "error", "data": None, "message": "Missing user_identifier to list objectives.", "error_code": "MISSING_USER_ID_FOR_LIST"}
+
+        query_filters = {
+            "kb_schema_type": "UserObjective",
+            "user_identifier": str(user_identifier)
+        }
+        if status_filter and isinstance(status_filter, str) and status_filter.strip():
+            query_filters["status"] = status_filter.strip()
+
+        # Query a larger number initially if we want to sort/limit later by priority in Python.
+        # For now, let's assume a reasonable limit like 20.
+        kb_results = await self.retrieve_knowledge(query_text=None, n_results=20, filter_metadata=query_filters)
+
+        if kb_results.get("status") == "success":
+            objectives_list = []
+            for item_dict in kb_results.get("results", []):
+                if item_dict.get("structured_document") and isinstance(item_dict["structured_document"], UserObjectiveDC):
+                    obj_dc: UserObjectiveDC = item_dict["structured_document"]
+                    objectives_list.append(obj_dc.to_dict()) # Use dataclass's asdict via to_dict()
+                elif item_dict.get("document_text"): # Fallback if deserialization failed but text exists
+                    try:
+                        obj_data = json.loads(item_dict["document_text"])
+                        objectives_list.append(obj_data) # Add raw dict
+                    except json.JSONDecodeError:
+                        print(f"{log_prefix} WARNING: Could not parse document_text for objective {item_dict.get('id')}")
+
+            # Optionally sort by priority here if needed, then by recency
+            objectives_list.sort(key=lambda x: (x.get('priority', 3), x.get('last_updated_timestamp_utc', '')), reverse=False) # Lower priority number = higher actual priority
+
+            msg = f"Found {len(objectives_list)} objectives for user '{user_identifier}' (filter: {status_filter or 'any status'})."
+            print(f"{log_prefix} SUCCESS: {msg}")
+            return {"status": "success", "data": objectives_list, "message": msg}
+        else:
+            err_msg = f"Failed to retrieve objectives for user '{user_identifier}'. Error: {kb_results.get('message')}"
+            print(f"{log_prefix} ERROR: {err_msg}")
+            return {"status": "error", "data": [], "message": err_msg, "error_code": "KB_RETRIEVE_FAILED_USER_OBJECTIVES"}
+
+   async def _service_masterplanner_set_user_objective_status(self, params: Dict, service_definition: AgentServiceDefinition) -> Dict:
+        log_prefix = f"[{self.__class__.__name__}._service_masterplanner_set_user_objective_status]"
+        user_identifier = params.get("user_identifier")
+        objective_id = params.get("objective_id")
+        new_status = params.get("new_status")
+
+        if not all([user_identifier, objective_id, new_status]):
+            return {"status": "error", "data": None, "message": "Missing user_identifier, objective_id, or new_status.", "error_code": "MISSING_PARAMS_FOR_STATUS_SET"}
+
+        # Validate status
+        valid_statuses = ["active", "on_hold", "completed", "archived"]
+        if new_status not in valid_statuses:
+            return {"status": "error", "data": None, "message": f"Invalid status '{new_status}'. Must be one of {valid_statuses}.", "error_code": "INVALID_OBJECTIVE_STATUS"}
+
+        # Retrieve the existing objective
+        # We use retrieve_knowledge to get the structured_document directly
+        kb_item_list = await self.retrieve_knowledge(
+            query_text=None, # Not a semantic search
+            n_results=1,
+            filter_metadata={
+                "kb_schema_type": "UserObjective",
+                "objective_id": str(objective_id), # Assuming objective_id is stored in metadata or is the content_id
+                                                 # If objective_id is the ChromaDB ID, then use get(ids=[objective_id])
+                                                 # For now, let's assume it's queryable via metadata.
+                                                 # This needs alignment with how store_knowledge sets IDs/metadata.
+                                                 # Let's assume objective_id IS the content_id used for Chroma.
+            }
+        )
+
+        # If using objective_id as ChromaDB content ID:
+        # existing_item_data = self.knowledge_collection.get(ids=[str(objective_id)], include=["documents", "metadatas"])
+        # if not (existing_item_data and existing_item_data.get('ids') and existing_item_data['ids'][0]):
+        #    return {"status": "error", "message": f"Objective ID '{objective_id}' not found."}
+        # doc_json_string = existing_item_data['documents'][0]
+        # current_metadata = existing_item_data['metadatas'][0]
+        # objective_record = UserObjectiveDC.from_json_string(doc_json_string)
+
+        retrieved_objectives = kb_results.get("results", [])
+        if not retrieved_objectives or not isinstance(retrieved_objectives[0].get("structured_document"), UserObjectiveDC):
+            err_msg = f"Objective ID '{objective_id}' not found for user '{user_identifier}'."
+            print(f"{log_prefix} ERROR: {err_msg}")
+            return {"status": "error", "data": None, "message": err_msg, "error_code": "OBJECTIVE_NOT_FOUND"}
+
+        objective_record: UserObjectiveDC = retrieved_objectives[0]["structured_document"]
+
+        if objective_record.user_identifier != str(user_identifier):
+            err_msg = f"Objective ID '{objective_id}' does not belong to user '{user_identifier}'."
+            print(f"{log_prefix} ERROR: {err_msg} - Record user: {objective_record.user_identifier}")
+            return {"status": "error", "data": None, "message": err_msg, "error_code": "OBJECTIVE_USER_MISMATCH"}
+
+        objective_record.status = new_status
+        objective_record.mark_updated() # Updates last_updated_timestamp_utc
+        if new_status == "completed" and not objective_record.completion_timestamp_utc:
+            objective_record.completion_timestamp_utc = datetime.datetime.utcnow().isoformat()
+        elif new_status != "completed": # Clear completion time if moved away from completed
+            objective_record.completion_timestamp_utc = None
+
+        # Re-store (upsert)
+        store_result = await self.store_knowledge(
+            structured_content=objective_record,
+            schema_type="UserObjective",
+             metadata={ # Update metadata for filtering
+                "source": "user_objective_service",
+                "user_identifier": objective_record.user_identifier,
+                "status": objective_record.status, # ensure new status is in metadata
+                "priority": objective_record.priority
+            },
+            content_id=objective_record.objective_id # This ensures an update
+        )
+
+        if store_result.get("status") == "success":
+            msg = f"Status of objective ID '{objective_id}' for user '{user_identifier}' set to '{new_status}'."
+            print(f"{log_prefix} SUCCESS: {msg}")
+            return {"status": "success", "data": {"objective_id": objective_id, "new_status": new_status}, "message": msg}
+        else:
+            err_msg = f"Failed to update status for objective ID '{objective_id}'. Error: {store_result.get('message')}"
+            print(f"{log_prefix} ERROR: {err_msg}")
+            return {"status": "error", "data": None, "message": err_msg, "error_code": "KB_UPDATE_FAILED_USER_OBJECTIVE_STATUS"}
 
 orchestrator = TerminusOrchestrator()

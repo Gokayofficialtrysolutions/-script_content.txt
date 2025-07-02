@@ -75,7 +75,8 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
                                  kg_past_plan_summary_context:str,
                                  plan_log_insights:str, feedback_insights_context:str,
                                  agent_desc:str,
-                                 planner_strategy: Optional[str] = "Strategy_Default") -> str:
+                                 planner_strategy: Optional[str] = "Strategy_Default",
+                                 active_objectives_string: Optional[str] = None) -> str:
    """
    Constructs the main, detailed prompt for the MasterPlanner LLM to generate an execution plan.
 
@@ -123,6 +124,14 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
    # If planner_strategy is "Strategy_Default" or unknown, strategy_specific_instructions remains empty,
    # and the LLM relies on the standard context_usage_instructions and overall task.
 
+   objectives_section = ""
+   if active_objectives_string and active_objectives_string.strip() and "No specific long-term objectives" not in active_objectives_string :
+       objectives_section = (
+           f"\n--- ACTIVE LONG-TERM USER OBJECTIVES ---\n"
+           f"{active_objectives_string}\n"
+           f"(These are overarching goals. Consider how the current request might align with or contribute to them.)\n"
+       )
+
    context_usage_instructions = (
        "When creating the plan, consider the following:\n"
        "1. The 'NLU Analysis' provides the primary intent, confidence score, any alternative intents, extracted entities, and potentially implicit user goals for the CURRENT request. Use all these NLU facets to deeply understand the user's needs.\n"
@@ -144,6 +153,7 @@ def construct_main_planning_prompt(user_prompt:str, history_context:str, nlu_inf
            f"--- KNOWLEDGE BASE & NLU CONTEXT ---\n"
            f"Current User Request: '{user_prompt}'\n"
            f"NLU Analysis of Current Request (Intent, Entities, Implicit Goals, Alternatives):\n{nlu_info}\n\n"
+           f"{objectives_section}" # Added objectives section
            f"{kb_section if kb_section.strip() else 'No specific information retrieved from Knowledge Base for this request.'}\n"
            f"{context_usage_instructions}"
            f"{strategy_specific_instructions}\n" # Added strategy specific instructions here

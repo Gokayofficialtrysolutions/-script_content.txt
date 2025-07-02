@@ -79,5 +79,85 @@
       "search_query": "query"
     },
     "default_params": {}
+  },
+  {
+    "command_name": "ADD_USER_OBJECTIVE",
+    "intent_aliases": ["CREATE_OBJECTIVE", "NEW_GOAL", "ADD_GOAL"],
+    "patterns": [
+      [
+        {"LOWER": {"IN": ["add", "create", "new", "set"]}},
+        {"LOWER": {"IN": ["user", "my", "long-term", "long term"]}, "OP": "*"},
+        {"LOWER": {"IN": ["objective", "goal"]}},
+        {"IS_PUNCT": True, "OP": "?"},
+        {"LOWER": {"IN": ["called", "named", "of", "to", "that", "for"]}, "OP": "?"},
+        {"TEXT": {"REGEX": ".+"}, "OP": "+", "CAPTURE": "description"}
+      ],
+      [
+        {"LOWER": {"IN": ["my", "new"]}},
+        {"LOWER": {"IN": ["objective", "goal"]}},
+        {"LOWER": "is"},
+        {"LOWER": "to", "OP": "?"},
+        {"TEXT": {"REGEX": ".+"}, "OP": "+", "CAPTURE": "description"}
+      ]
+    ],
+    "entity_mapping": {
+      "description": "description"
+    },
+    "default_params": {
+      "user_identifier": "default_user", "priority": 3
+    }
+  },
+  {
+    "command_name": "LIST_USER_OBJECTIVES",
+    "intent_aliases": ["SHOW_OBJECTIVES", "VIEW_GOALS", "WHAT_ARE_MY_GOALS"],
+    "patterns": [
+      [
+        {"LOWER": {"IN": ["list", "show", "view", "get", "what are"]}},
+        {"LOWER": {"IN": ["my", "user", "the", "all"]}, "OP": "?"},
+        {"LOWER": "active", "OP": "?", "CAPTURE": "status_active"},
+        {"LOWER": "completed", "OP": "?", "CAPTURE": "status_completed"},
+        {"LOWER": "on-hold", "OP": "?", "CAPTURE": "status_on_hold"},
+        {"LOWER": {"IN": ["objectives", "goals"]}}
+      ]
+    ],
+    "entity_mapping": {
+        "status_active": "status_filter_active",
+        "status_completed": "status_filter_completed",
+        "status_on_hold": "status_filter_on_hold"
+    },
+    "default_params": {
+      "user_identifier": "default_user"
+    },
+    "post_processing_logic": {
+        "derive_status_filter": {
+            "source_entities": ["status_filter_active", "status_filter_completed", "status_filter_on_hold"],
+            "target_param": "status_filter",
+            "logic": "first_truthy_value_as_status"
+        }
+    }
+  },
+  {
+    "command_name": "SET_USER_OBJECTIVE_STATUS",
+    "intent_aliases": ["UPDATE_OBJECTIVE_STATUS", "CHANGE_GOAL_STATUS"],
+    "patterns": [
+      [
+        {"LOWER": {"IN": ["set", "update", "change", "mark"]}},
+        {"LOWER": {"IN": ["user", "my"]}, "OP": "?"},
+        {"LOWER": {"IN": ["objective", "goal"]}},
+        {"ENT_TYPE": {"IN": ["OBJECTIVE_ID", "PRODUCT", "ORG", "WORK_OF_ART"]}, "CAPTURE": "objective_id"},
+        {"LOWER": {"IN": ["to", "as", "status to"]}, "OP": "?"},
+        {"LOWER": {"IN": ["active", "completed", "on-hold", "on_hold", "archived"]}, "CAPTURE": "new_status"}
+      ]
+    ],
+    "entity_mapping": {
+      "objective_id": "objective_id",
+      "new_status": "new_status"
+    },
+    "default_params": {
+      "user_identifier": "default_user"
+    },
+    "value_transformations": {
+        "new_status": {"on-hold": "on_hold"}
+    }
   }
 ]

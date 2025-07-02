@@ -146,6 +146,47 @@ class GenericDocumentDC(BaseKBSchema):
             import hashlib
             self.original_content_hash = hashlib.sha256(self.original_content.encode('utf-8')).hexdigest()
 
+@dataclass
+class UserObjectiveDC(BaseKBSchema):
+    """
+    Dataclass for storing a user's long-term objective.
+    """
+    objective_id: str = field(default_factory=lambda: f"userobj_{uuid.uuid4()}")
+    user_identifier: str  # Associates with a user, session, or project.
+    description: str      # Textual description of the objective.
+    status: str           # e.g., "active", "on_hold", "completed", "archived".
+    priority: int = 3     # Default priority (e.g., 1-High, 5-Low).
+    created_timestamp_utc: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    last_updated_timestamp_utc: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    completion_timestamp_utc: Optional[str] = None
+    related_project_id: Optional[str] = None
+    key_details: Dict[str, Any] = field(default_factory=dict) # For additional structured info.
+    notes: Optional[str] = None
+
+    def __post_init__(self):
+        # Ensure last_updated is set if not explicitly passed (e.g. on creation from_json_string)
+        if not hasattr(self, 'last_updated_timestamp_utc') or not self.last_updated_timestamp_utc:
+            self.last_updated_timestamp_utc = datetime.datetime.utcnow().isoformat()
+        if not hasattr(self, 'created_timestamp_utc') or not self.created_timestamp_utc:
+             self.created_timestamp_utc = datetime.datetime.utcnow().isoformat()
+
+
+    def to_dict_for_prompt(self) -> Dict[str, Any]:
+        """Returns a simplified dict suitable for including in an LLM prompt context."""
+        prompt_dict = {
+            "id": self.objective_id,
+            "description": self.description,
+            "status": self.status,
+            "priority": self.priority,
+            "last_updated": self.last_updated_timestamp_utc
+        }
+        if self.key_details:
+            prompt_dict["key_details"] = self.key_details
+        return prompt_dict
+
+    def mark_updated(self):
+        self.last_updated_timestamp_utc = datetime.datetime.utcnow().isoformat()
+
 if __name__ == '__main__':
     print("--- Testing PlanExecutionRecordDC ---")
     plan_rec = PlanExecutionRecordDC(
