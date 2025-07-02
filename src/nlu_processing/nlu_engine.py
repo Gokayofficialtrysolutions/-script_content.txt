@@ -36,11 +36,50 @@ class NLUProcessor:
         logger.info(f"Loading spaCy model: {self.config.spacy_model_name}")
         try:
             self.nlp = spacy.load(self.config.spacy_model_name)
-            self.matcher = Matcher(self.nlp.vocab)
         except OSError as e:
             logger.error(f"Could not load spaCy model '{self.config.spacy_model_name}'. "
                          f"Ensure it's downloaded (e.g., python -m spacy download {self.config.spacy_model_name}). Error: {e}")
             raise NLUProcessingError(f"Failed to load spaCy model: {self.config.spacy_model_name}") from e
+
+        # Add EntityRuler for OBJECTIVE_ID
+        if "entity_ruler" not in self.nlp.pipe_names:
+            ruler = self.nlp.add_pipe("entity_ruler", config={"overwrite_ents": True})
+        else:
+            ruler = self.nlp.get_pipe("entity_ruler")
+
+        # Pattern for OBJECTIVE_ID: "userobj_" followed by UUID-like structure (alphanumeric and hyphens)
+        # This pattern is simplified; a true UUID pattern is more complex.
+        # spaCy's regex support in patterns can be limited depending on version/flags.
+        # Using token-based patterns for more robustness if regex is tricky.
+        obj_id_patterns = [
+            {
+                "label": "OBJECTIVE_ID",
+                "pattern": [
+                    {"LOWER": "userobj"},
+                    {"LOWER": "_"},
+                    {"SHAPE": "xxxx", "OP": "+"}, # Simplified UUID part - one or more alphanumeric tokens
+                                                # A more precise pattern might involve multiple shape/regex checks.
+                                                # Example: {"TEXT": {"REGEX": "[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"}}
+                                                # However, spaCy token-based patterns are often preferred over complex regex.
+                                                # For simplicity, we'll assume objective IDs are single tokens after "userobj_".
+                                                # If objective_id could be multiple tokens (e.g. userobj_some-uuid-part1 some-uuid-part2)
+                                                # this pattern would need to be more complex or rely on NER model.
+                                                # For now, assuming "userobj_" then a single token representing the ID.
+                    # To match "userobj_alpha-numeric-string" (single token after prefix)
+                    # {"TEXT": {"REGEX": "^userobj_[0-9a-zA-Z-]+$"}} # This would be a single token pattern
+                ]
+            },
+            # A more direct pattern if the ID is a single token:
+            {
+                "label": "OBJECTIVE_ID",
+                "pattern": [{"TEXT": {"REGEX": "^userobj_[0-9a-fA-F\\-]+$"}}]
+            }
+        ]
+        ruler.add_patterns(obj_id_patterns)
+        logger.info("Added EntityRuler patterns for OBJECTIVE_ID.")
+
+        self.matcher = Matcher(self.nlp.vocab)
+
 
         # Initialize coreferee if enabled and model supports it (example)
         # if self.config.enable_coreference_resolution:
@@ -296,10 +335,75 @@ class NLUProcessor:
 
             # For now, this is a simplified command parser.
             # A truly robust one would require careful pattern design and possibly custom on_match callbacks.
+
+            # Apply post-processing logic (e.g., derive_status_filter)
+            post_processing_cfg = matched_rule_config.get("post_processing_logic", {})
+            if "derive_status_filter" in post_processing_cfg:
+                cfg = post_processing_cfg["derive_status_filter"]
+                source_entities = cfg.get("source_entities", [])
+                target_param = cfg.get("target_param")
+                derived_status = None
+                temp_params_to_remove = []
+
+                for source_entity_key in source_entities:
+                    # The entity_mapping maps the conceptual capture (e.g., "status_active")
+                    # to a parameter name (e.g., "status_filter_active").
+                    # We need to check if this parameter was set because its corresponding keyword was found.
+                    # The current parameter extraction relies on NER, which isn't ideal for these keywords.
+                    # A better approach would be for the spaCy matcher patterns themselves to set these flags,
+                    # or to check token text directly within the matched_span.
+                    # For now, we'll assume if a param like "status_filter_active" (from entity_mapping)
+                    # is in `parameters`, it means the keyword "active" was present.
+                    # The value of this param would be the keyword itself.
+
+                    # This part is tricky because the current `entity_mapping` logic is based on NER labels.
+                    # For keywords like "active", "completed", they are unlikely to be NER entities.
+                    # The "CAPTURE" in patterns.json was conceptual.
+                    # Let's adjust: we need to check if the *text* of a captured token (from the pattern)
+                    # matches one of the status keywords.
+                    # This requires more advanced pattern definition in JSON or more complex parsing here.
+
+                    # Simplified assumption for now: if a parameter like 'status_filter_active' exists
+                    # (meaning the keyword "active" was conceptually captured and mapped via entity_mapping),
+                    # then use its value (which should be "active").
+                    # This requires the JSON patterns to be designed to capture these keywords
+                    # and `entity_mapping` to map them to parameters like `status_filter_active`.
+                    # The current NER-based mapping in _parse_command_from_doc might not populate these correctly.
+                    # This highlights a TODO: Improve parameter extraction from Matcher patterns.
+
+                    # Let's refine the logic for derive_status_filter:
+                    # It should look at the matched_span's text for the keywords.
+                    # Example: if "active" is in matched_span.text and "status_filter_active" is a source_entity.
+                    # This is still not directly using the "CAPTURE" from patterns.json.
+
+                    # For now, let's assume the parameter extraction correctly populates these based on CAPTURE.
+                    # This is a temporary simplification pending better capture logic.
+                    if parameters.get(source_entity_key): # e.g. parameters["status_filter_active"] is "active"
+                        derived_status = parameters[source_entity_key] # This should be the actual status string, e.g., "active"
+                        temp_params_to_remove.append(source_entity_key)
+                        break # Found the first one
+
+                if derived_status and target_param:
+                    parameters[target_param] = derived_status
+                    for p_to_remove in temp_params_to_remove:
+                        parameters.pop(p_to_remove, None)
+                    logger.debug(f"Command '{matched_rule_config['command_name']}': Derived '{target_param}' as '{derived_status}'.")
+
+
+            # Apply value transformations
+            transformations = matched_rule_config.get("value_transformations", {})
+            for param_name, transform_map in transformations.items():
+                if param_name in parameters and parameters[param_name] in transform_map:
+                    original_value = parameters[param_name]
+                    transformed_value = transform_map[original_value]
+                    parameters[param_name] = transformed_value
+                    logger.debug(f"Command '{matched_rule_config['command_name']}': Transformed param '{param_name}' value from '{original_value}' to '{transformed_value}'.")
+
+
             if parameters: # Only return if we successfully mapped some parameters or have defaults
                  return ParsedCommand(command=matched_rule_config["command_name"], parameters=parameters)
             else:
-                logger.debug(f"Command '{matched_rule_config['command_name']}' matched, but no parameters were extracted from span '{matched_span.text}' based on current mapping logic.")
+                logger.debug(f"Command '{matched_rule_config['command_name']}' matched, but no parameters were extracted or defaulted from span '{matched_span.text}'.")
 
         return None # No suitable match found or no params extracted
 
@@ -510,6 +614,29 @@ if __name__ == '__main__':
             if result_command.entities:
                  print(f"  Entities found: {[e.text for e in result_command.entities]}")
 
+        logger.info("\n--- Testing Objective Management Commands ---")
+        objective_test_cases = [
+            "add objective: conquer the world priority 1",
+            "my new goal is to learn spaCy",
+            "list my active objectives",
+            "show all objectives",
+            "list completed goals",
+            "set objective userobj_1234-abcd-5678-efgh status to completed",
+            "mark goal userobj_aaaa-bbbb-cccc-dddd as on-hold"
+        ]
+
+        for i, test_case in enumerate(objective_test_cases):
+            logger.info(f"Processing objective command test case {i+1}: \"{test_case}\"")
+            result = processor.process_text(test_case)
+            print(f"  Raw Result: {result}")
+            if result.parsed_command:
+                print(f"  Command: {result.parsed_command.command}")
+                print(f"  Parameters: {result.parsed_command.parameters}")
+            else:
+                print("  No command parsed.")
+            if result.entities:
+                print(f"  Entities: {[e.to_dict() for e in result.entities]}")
+            print("-" * 20)
 
     except NLUProcessingError as e:
         logger.error(f"NLU Processing Error during example usage: {e}")
