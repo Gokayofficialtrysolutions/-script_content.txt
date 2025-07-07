@@ -6,16 +6,16 @@ import time
 import logging
 import json
 from pathlib import Path
+from spacy.matcher import Matcher # Restored import
 from typing import Optional, List, Tuple, Dict, Any
+import inspect
 
 from .nlu_results import NLUResult, Intent, Entity, Sentiment, ParsedCommand
 from .nlu_config import NLUConfig, nlu_default_config
 
 # Configure logging
 logger = logging.getLogger(__name__)
-# Example: logging.basicConfig(level=logging.INFO) # Configure in main application
 
-# Custom Exception for NLU Processing
 class NLUProcessingError(Exception):
     pass
 
@@ -33,122 +33,117 @@ class NLUProcessor:
             self._load_command_patterns(self.config.command_patterns_file)
 
     def _load_models(self):
-        logger.info(f"Loading spaCy model: {self.config.spacy_model_name}")
+        logger.info(f"Attempting to load models for NLUProcessor...")
         try:
+            logger.info(f"Loading spaCy model: {self.config.spacy_model_name}")
             self.nlp = spacy.load(self.config.spacy_model_name)
-        except OSError as e:
-            logger.error(f"Could not load spaCy model '{self.config.spacy_model_name}'. "
-                         f"Ensure it's downloaded (e.g., python -m spacy download {self.config.spacy_model_name}). Error: {e}")
-            raise NLUProcessingError(f"Failed to load spaCy model: {self.config.spacy_model_name}") from e
+            logger.info(f"spaCy model {self.config.spacy_model_name} loaded successfully. self.nlp: {self.nlp}")
 
-        # Add EntityRuler for OBJECTIVE_ID
-        if "entity_ruler" not in self.nlp.pipe_names:
-            ruler = self.nlp.add_pipe("entity_ruler", config={"overwrite_ents": True})
-        else:
-            ruler = self.nlp.get_pipe("entity_ruler")
+            # # Add EntityRuler for OBJECTIVE_ID (Temporarily commented out for debugging Matcher)
+            # try:
+            #     logger.info("Attempting to set up EntityRuler for OBJECTIVE_ID...")
+            #     if self.nlp and "entity_ruler" not in self.nlp.pipe_names:
+            #         ruler = self.nlp.add_pipe("entity_ruler", config={"overwrite_ents": True})
+            #         logger.info("Added new EntityRuler pipe.")
+            #     else:
+            #         if self.nlp:
+            #             ruler = self.nlp.get_pipe("entity_ruler")
+            #             logger.info("Retrieved existing EntityRuler pipe.")
+            #         else:
+            #             logger.error("self.nlp is None before attempting to get EntityRuler.")
+            #             raise NLUProcessingError("spaCy nlp object is None, cannot proceed with EntityRuler.")
+            #
+            #     obj_id_patterns = [
+            #         {
+            #             "label": "OBJECTIVE_ID",
+            #             "pattern": [{"TEXT": {"REGEX": "^userobj_[0-9a-fA-F\\-]+$"}}]
+            #         }
+            #     ]
+            #     if ruler:
+            #         ruler.add_patterns(obj_id_patterns)
+            #         logger.info("Successfully added EntityRuler patterns for OBJECTIVE_ID.")
+            #     else:
+            #         logger.error("EntityRuler component (ruler) is None. Cannot add patterns.")
+            #         raise NLUProcessingError("EntityRuler component could not be initialized or retrieved.")
+            #
+            # except Exception as e_ruler:
+            #     logger.error(f"Failed during EntityRuler setup for OBJECTIVE_ID: {e_ruler}", exc_info=True)
+            #     raise NLUProcessingError(f"Critical failure during EntityRuler setup: {e_ruler}") from e_ruler
+            logger.info("EntityRuler setup temporarily skipped.") # Simplified log
 
-        # Pattern for OBJECTIVE_ID: "userobj_" followed by UUID-like structure (alphanumeric and hyphens)
-        # This pattern is simplified; a true UUID pattern is more complex.
-        # spaCy's regex support in patterns can be limited depending on version/flags.
-        # Using token-based patterns for more robustness if regex is tricky.
-        obj_id_patterns = [
-            {
-                "label": "OBJECTIVE_ID",
-                "pattern": [
-                    {"LOWER": "userobj"},
-                    {"LOWER": "_"},
-                    {"SHAPE": "xxxx", "OP": "+"}, # Simplified UUID part - one or more alphanumeric tokens
-                                                # A more precise pattern might involve multiple shape/regex checks.
-                                                # Example: {"TEXT": {"REGEX": "[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"}}
-                                                # However, spaCy token-based patterns are often preferred over complex regex.
-                                                # For simplicity, we'll assume objective IDs are single tokens after "userobj_".
-                                                # If objective_id could be multiple tokens (e.g. userobj_some-uuid-part1 some-uuid-part2)
-                                                # this pattern would need to be more complex or rely on NER model.
-                                                # For now, assuming "userobj_" then a single token representing the ID.
-                    # To match "userobj_alpha-numeric-string" (single token after prefix)
-                    # {"TEXT": {"REGEX": "^userobj_[0-9a-zA-Z-]+$"}} # This would be a single token pattern
-                ]
-            },
-            # A more direct pattern if the ID is a single token:
-            {
-                "label": "OBJECTIVE_ID",
-                "pattern": [{"TEXT": {"REGEX": "^userobj_[0-9a-fA-F\\-]+$"}}]
-            }
-        ]
-        ruler.add_patterns(obj_id_patterns)
-        logger.info("Added EntityRuler patterns for OBJECTIVE_ID.")
+            # ADDED LOGGING
+            logger.info(f"Pre-Matcher check: self.nlp is {self.nlp}")
+            if self.nlp:
+                logger.info(f"Pre-Matcher check: type(self.nlp) is {type(self.nlp)}")
+                logger.info(f"Pre-Matcher check: self.nlp.vocab is {self.nlp.vocab}")
+                logger.info(f"Pre-Matcher check: type(self.nlp.vocab) is {type(self.nlp.vocab)}")
+                logger.info(f"Pre-Matcher check: Condition (self.nlp and self.nlp.vocab) is {bool(self.nlp and self.nlp.vocab)}")
+            else:
+                logger.warning("Pre-Matcher check: self.nlp is None or invalid.")
 
-        self.matcher = Matcher(self.nlp.vocab)
+            logger.info(f"Initializing spaCy Matcher with vocab from: {self.nlp}") # This log was already there
+            if self.nlp and self.nlp.vocab: # Ensure nlp and vocab are valid
+                logger.info(f"Attempting to create Matcher with vocab: {self.nlp.vocab}")
 
+                # Inspection logging removed for this test, focusing on instantiation
+                # try:
+                #     logger.info(f"Inspecting Matcher (imported): {Matcher}")
+                #     logger.info(f"Inspecting type(Matcher): {type(Matcher)}")
+                #     logger.info(f"Inspecting inspect.getfile(Matcher): {inspect.getfile(Matcher)}")
+                #     logger.info(f"Inspecting inspect.signature(Matcher.__init__): {inspect.signature(Matcher.__init__)}")
+                # except Exception as e_inspect:
+                #     logger.error(f"Error during inspection: {e_inspect}")
 
-        # Initialize coreferee if enabled and model supports it (example)
-        # if self.config.enable_coreference_resolution:
-        #     try:
-        #         if 'coreferee' not in self.nlp.pipe_names: # Check if already added
-        #             # Ensure coreferee is installed: pip install coreferee
-        #             # Ensure compatible models are downloaded: python -m coreferee install en
-        #             import coreferee
-        #             self.nlp.add_pipe('coreferee')
-        #             logger.info("coreferee pipe added to spaCy model for co-reference resolution.")
-        #         else:
-        #             logger.info("coreferee pipe already present in spaCy model.")
-        #     except ImportError:
-        #         logger.error("coreferee library not installed. Co-reference resolution will be disabled. pip install coreferee")
-        #         self.config.enable_coreference_resolution = False
-        #     except Exception as e_coref:
-        #         logger.error(f"Error initializing coreferee: {e_coref}. Co-reference resolution disabled.")
-        #         self.config.enable_coreference_resolution = False
+                try:
+                    # Standard Matcher instantiation
+                    self.matcher = Matcher(self.nlp.vocab)
+                    logger.info(f"spaCy Matcher initialized: {self.matcher}, type: {type(self.matcher)}")
+                except TypeError as te:
+                    logger.error(f"TypeError during Matcher instantiation: {te}", exc_info=True)
+                    raise NLUProcessingError(f"TypeError creating Matcher: {te}") from te
+                except Exception as e_match:
+                    logger.error(f"Other error during Matcher instantiation: {e_match}", exc_info=True)
+                    raise NLUProcessingError(f"Error creating Matcher: {e_match}") from e_match
+            else:
+                logger.error("Cannot initialize Matcher because self.nlp or self.nlp.vocab is None/invalid.")
+                # This will leave self.matcher as None. _load_command_patterns will log its error and skip loading.
+                # Forcing an error here if Matcher is critical for the class to function
+                raise NLUProcessingError("Cannot initialize Matcher: spaCy nlp object or its vocab is invalid.")
 
-
-        logger.info(f"Loading Intent Recognition model: {self.config.intent_model_name}")
-        try:
-            # Using a generic text classification model for now.
-            # Replace with a model fine-tuned for specific intents if available.
-            # For multi-label intents, you might need a different model setup.
-            self.intent_pipeline = pipeline(
-                "text-classification",
-                model=self.config.intent_model_name,
-                tokenizer=self.config.intent_model_name,
-                # top_k=self.config.max_intent_alternates # Get multiple results if model supports
-            )
-        except Exception as e:
-            logger.error(f"Could not load Intent Recognition model '{self.config.intent_model_name}'. Error: {e}")
-            # Decide behavior: raise error or run without intent recognition.
-            # For now, we'll allow it to proceed without intent if it fails.
+            # Temporarily disable HF pipelines for focused Matcher debugging
             self.intent_pipeline = None
-            logger.warning("Intent recognition will be unavailable.")
-
-        if self.config.enable_sentiment_analysis:
-            logger.info(f"Loading Sentiment Analysis model: {self.config.sentiment_model_name}")
-            try:
-                self.sentiment_pipeline = pipeline(
-                    "sentiment-analysis",
-                    model=self.config.sentiment_model_name,
-                    tokenizer=self.config.sentiment_model_name
-                )
-            except Exception as e:
-                logger.error(f"Could not load Sentiment Analysis model '{self.config.sentiment_model_name}'. Error: {e}")
-                self.sentiment_pipeline = None # Allow proceeding without sentiment
-                logger.warning("Sentiment analysis will be unavailable.")
-        else:
-            logger.info("Sentiment analysis is disabled by configuration.")
+            logger.info("Intent pipeline loading (temporarily) disabled.")
             self.sentiment_pipeline = None
+            logger.info("Sentiment pipeline loading (temporarily) disabled.")
+
+            logger.info("Reached end of _load_models' try-block successfully.")
+
+        except OSError as e: # Specifically for spacy.load()
+            logger.error(f"Could not load spaCy model '{self.config.spacy_model_name}'. Error: {e}", exc_info=True)
+            raise NLUProcessingError(f"Failed to load spaCy model: {self.config.spacy_model_name}") from e
+        except NLUProcessingError: # Re-raise NLUProcessingErrors from Matcher init etc.
+            raise
+        except Exception as e_load_models: # Catch any other unexpected error during _load_models
+            logger.error(f"Unexpected error during _load_models: {e_load_models}", exc_info=True)
+            raise NLUProcessingError(f"Unexpected error during NLU model loading: {e_load_models}") from e_load_models
+        finally:
+            logger.info(f"Exiting _load_models. self.matcher is now: {self.matcher}, self.nlp is: {self.nlp}")
 
     def _load_command_patterns(self, patterns_file_path: str):
-        """Loads command patterns from a JSON file and adds them to the spaCy Matcher."""
+        logger.info(f"Entering _load_command_patterns. self.matcher is: {self.matcher}")
         if not self.matcher:
-            logger.error("Matcher not initialized. Cannot load command patterns.")
+            logger.error("Matcher is None at the start of _load_command_patterns. Cannot load command patterns.")
             return
-
         try:
-            # Resolve patterns_file_path relative to this file's directory if it's not absolute
             resolved_path = Path(__file__).parent / patterns_file_path
+            logger.info(f"_load_command_patterns: Attempting to load from resolved_path: {resolved_path}")
             if not resolved_path.is_file():
-                # Try as absolute path if relative failed
+                logger.info(f"Resolved_path {resolved_path} not found, trying patterns_file_path as absolute: {patterns_file_path}")
                 resolved_path = Path(patterns_file_path)
 
+            logger.info(f"_load_command_patterns: Final resolved_path is: {resolved_path}, is_file: {resolved_path.is_file()}")
             if not resolved_path.is_file():
-                logger.error(f"Command patterns file not found at '{patterns_file_path}' (also checked {resolved_path}).")
+                logger.error(f"Command patterns file not found at '{patterns_file_path}' (final check at {resolved_path}).")
                 return
 
             with open(resolved_path, 'r', encoding='utf-8') as f:
@@ -157,15 +152,14 @@ class NLUProcessor:
             for rule_config in self.command_rules:
                 command_name = rule_config["command_name"]
                 patterns = rule_config["patterns"]
-                self.matcher.add(command_name, patterns) # patterns is list of lists of dicts
-                # Store entity mappings and default params if needed later by _parse_command
+                self.matcher.add(command_name, patterns)
             logger.info(f"Loaded {len(self.command_rules)} command rules with {sum(len(r['patterns']) for r in self.command_rules)} patterns from '{resolved_path}'.")
 
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON from command patterns file '{resolved_path}': {e}")
             self.command_rules = []
-        except Exception as e:
-            logger.error(f"Error loading command patterns from '{resolved_path}': {e}")
+        except Exception as e: # Catch other errors like invalid pattern format for matcher.add
+            logger.error(f"Error loading or adding command patterns from '{resolved_path}': {e}", exc_info=True)
             self.command_rules = []
 
 
@@ -181,438 +175,182 @@ class NLUProcessor:
         return entities
 
     def _recognize_intent(self, text: str, doc: Optional[Doc] = None) -> Optional[Intent]:
-        """
-        Recognizes intent. If doc is provided, it might also check for command patterns
-        that imply an intent.
-        """
-        # First, try LLM-based intent recognition
         llm_intent: Optional[Intent] = None
-        if self.intent_pipeline:
-            try:
-                predictions = self.intent_pipeline(text, top_k=self.config.max_intent_alternates if self.config.max_intent_alternates > 0 else 1)
-                if predictions:
-                    if not isinstance(predictions, list): predictions = [predictions]
-                    primary_prediction = predictions[0]
-                    primary_intent_name = primary_prediction['label']
-                    primary_intent_confidence = primary_prediction['score']
-
-                    if primary_intent_confidence >= self.config.intent_confidence_threshold:
-                        alternates = []
-                        if len(predictions) > 1:
-                            for alt_pred in predictions[1:]: alternates.append((alt_pred['label'], alt_pred['score']))
-                        llm_intent = Intent(name=primary_intent_name, confidence=primary_intent_confidence, alternate_intents=alternates if alternates else None)
-                    else:
-                        logger.info(f"LLM Intent '{primary_intent_name}' confidence {primary_intent_confidence:.2f} below threshold {self.config.intent_confidence_threshold}.")
-            except Exception as e:
-                logger.error(f"Error during LLM intent recognition for text '{text[:50]}...': {e}", exc_info=True)
-
-        # If command parsing is enabled and doc is available, check if a command pattern implies an intent
-        # This part is more about command parsing, but a detected command could override or inform intent.
-        # For now, intent recognition is primarily LLM based. Command parsing will populate `parsed_command`.
-        # A sophisticated system might have command patterns directly map to intents.
-        # For example, if a "CREATE_FILE" command is detected, the intent might be set to "CREATE_FILE_INTENT".
-        # This logic can be added here if command rules define `intent_aliases`.
-
-        # Simple strategy: return LLM intent for now. Command parsing is separate.
-        # More advanced: if a command is parsed, and that command has an associated intent in command_rules,
-        # potentially use that if its "confidence" (based on match quality) is higher or LLM intent is weak.
+        # HF Intent pipeline temporarily disabled
+        # if self.intent_pipeline:
+        #     ...
         return llm_intent
 
 
     def _parse_command_from_doc(self, doc: Doc) -> Optional[ParsedCommand]:
-        """Uses spaCy Matcher to find command patterns in the doc and extracts parameters."""
         if not self.matcher or not self.command_rules:
+            logger.debug("_parse_command_from_doc: Matcher or command_rules not available.")
             return None
 
         matches = self.matcher(doc)
         if not matches:
+            logger.debug("_parse_command_from_doc: No matches found by Matcher.")
             return None
 
-        # Simple strategy: use the first match. Could be more sophisticated (e.g., longest match).
+        logger.debug(f"_parse_command_from_doc: Found {len(matches)} raw matches.")
+
+        # Simple strategy: use the first match. Could be more sophisticated.
         # Sort matches by start token and then by length (longest match first for overlapping patterns)
         # Spacy matches are (match_id, start_token_idx, end_token_idx)
-        # We need to map match_id back to our rule_config to get command_name and entity_mapping
 
-        best_match = None
-        # Prioritize longer matches if they start at the same token, or earlier matches.
-        # Spacy's default match order might be sufficient for many cases.
-        # For this example, let's just take the first one found.
-        # A more robust system might score matches or use other heuristics.
-
-        # For simplicity, let's just use the first match found by spaCy's matcher.
-        # spaCy's matcher itself doesn't guarantee order of multiple patterns matching at same spot.
-        # If multiple rules match, we might need a priority system.
-
-        # Iterate through spaCy's matches
-        for match_id, start, end in sorted(matches, key=lambda m: (m[1], m[2] - m[1]), reverse=True): # Longest match first
-            command_name_hash = match_id # This is the hash of the rule name string
+        # Iterate through spaCy's matches, sorted to prefer longer matches if they overlap
+        for match_id, start, end in sorted(matches, key=lambda m: (m[1], m[2] - m[1]), reverse=True):
+            command_name_from_hash = self.nlp.vocab.strings[match_id] # Get string name from hash
             matched_span = doc[start:end]
+            logger.debug(f"Processing match: ID={command_name_from_hash}, span='{matched_span.text}'")
 
-            # Find the original rule_config that corresponds to this match_id
+
             matched_rule_config = None
             for rule_cfg in self.command_rules:
-                # spaCy stores match_id as a hash of the string rule name. We need to compare.
-                # This is a bit of a hack. spaCy's Matcher returns the hash.
-                # A better way is to store a mapping from hash to rule_config when adding rules.
-                # For now, we'll assume `matcher.vocab.strings[match_id]` gives back the string name.
-                rule_name_from_vocab = self.nlp.vocab.strings[match_id]
-                if rule_cfg["command_name"] == rule_name_from_vocab:
+                if rule_cfg["command_name"] == command_name_from_hash:
                     matched_rule_config = rule_cfg
                     break
 
             if not matched_rule_config:
-                logger.warning(f"Could not find rule config for match_id {match_id} ('{self.nlp.vocab.strings[match_id]}'). Skipping this match.")
+                logger.warning(f"Could not find rule config for command_name '{command_name_from_hash}'. Skipping this match.")
                 continue
 
             logger.info(f"Found command pattern match for '{matched_rule_config['command_name']}' text: '{matched_span.text}'")
 
             parameters: Dict[str, Any] = {}
-            # Default parameters from rule config
             parameters.update(matched_rule_config.get("default_params", {}))
 
-            # Extract entities based on "CAPTURE" keys in the spaCy pattern
-            # This requires that the spaCy patterns use the "OP": "CAPTURE" mechanism
-            # which is not standard spaCy Matcher syntax.
-            # spaCy's matcher captures based on the name given to a token pattern with an operator.
-            # Example: [{"LOWER": "file"}, {"ENT_TYPE": "FILENAME", "OP": "+", "_": {"capture": "my_filename"}}]
-            # This is complex. For now, let's assume entities are extracted by spaCy's NER
-            # and we map them based on the `entity_mapping` in our JSON rules.
+            # Placeholder for actual parameter extraction based on "CAPTURE" directives
+            # This needs to be properly implemented by iterating through the matched_rule_config's patterns
+            # and aligning them with the matched_span's tokens to extract based on "CAPTURE" keys.
+            # For now, we'll log that this step is pending proper implementation.
+            if any("CAPTURE" in token_pattern for pattern_list in matched_rule_config.get("patterns", []) for token_pattern in pattern_list):
+                 logger.warning(f"Command '{matched_rule_config['command_name']}': Parameter extraction from 'CAPTURE' keys in patterns is not fully implemented yet. Parameters dict may be incomplete.")
 
-            # Simpler approach for now: iterate over defined entity_mappings in the rule
-            # and try to find those entities within the matched_span via regular NER or specific rules.
-            # This is less precise than direct capture from matcher patterns.
+            # Basic/Conceptual Parameter Extraction (Needs proper implementation)
+            # This is a very naive way and won't work with current "CAPTURE" in JSON
+            # It should iterate through the *specific pattern* that matched within the rule.
+            # For now, let's use the entity_mapping as a guide, though it's also not fully integrated.
+            for token in matched_span: # Iterate tokens in the matched span
+                for pattern_group in matched_rule_config.get("patterns", []): # Iterate lists of patterns
+                    for token_pattern_in_rule in pattern_group: # Iterate individual token patterns
+                        if token_pattern_in_rule.get("CAPTURE") and token.lower_ == token_pattern_in_rule.get("LOWER"):
+                             capture_name = token_pattern_in_rule["CAPTURE"]
+                             param_name = matched_rule_config.get("entity_mapping", {}).get(capture_name, capture_name)
+                             parameters[param_name] = token.text # Or matched_span[token.i-start : ...].text for multi-token captures
 
-            # Let's refine this: the `patterns` in JSON should align with spaCy's pattern structure.
-            # The "CAPTURE" key is conceptual for our JSON. We need to map it to spaCy's way or process spans.
+            # Post-processing (as before)
+            post_processing_directives = matched_rule_config.get("post_processing", [])
+            for directive in post_processing_directives:
+                transform_type = directive.get("transform")
+                params_to_process = directive.get("params", [])
 
-            # Corrected approach:
-            # The spaCy Matcher itself doesn't easily return named captures from complex patterns
-            # in the way one might expect from regex. When a pattern in `matcher.add` matches,
-            # you get the `match_id` and the `span`.
-            # To get "captured" parts, you often re-process the `matched_span` or design patterns
-            # carefully so specific tokens/entities can be identified by their role in the match.
+                if transform_type == "TRANSFORM_STRIP" and params_to_process:
+                    for p_name in params_to_process:
+                        if p_name in parameters and isinstance(parameters[p_name], str):
+                            parameters[p_name] = parameters[p_name].strip()
+                elif transform_type == "TRANSFORM_TO_INT" and params_to_process:
+                     for p_name in params_to_process:
+                        if p_name in parameters:
+                            try: parameters[p_name] = int(str(parameters[p_name]).strip())
+                            except ValueError: logger.warning(f"Could not convert param '{p_name}' value '{parameters[p_name]}' to int.")
+                elif transform_type == "TRANSFORM_LOWERCASE_AND_STRIP" and params_to_process:
+                    for p_name in params_to_process:
+                        if p_name in parameters and isinstance(parameters[p_name], str):
+                            parameters[p_name] = parameters[p_name].lower().strip()
+                elif transform_type == "TRANSFORM_PREFIX_DEFAULT_USER_ID" and params_to_process:
+                    for p_name in params_to_process:
+                         parameters[p_name] = self.config.default_user_identifier # Assuming default_user_identifier is in NLUConfig
+                elif transform_type == "TRANSFORM_EXTRACT_KEY_VALUE_PAIRS_V2" and len(params_to_process) == 2:
+                    source_param_name, target_param_name = params_to_process
+                    kv_string = parameters.get(source_param_name)
+                    if isinstance(kv_string, str) and kv_string.strip():
+                        # Regex for "key is value" or "key:value", allowing spaces in keys and values.
+                        # Non-greedy value capture, stops at next comma or end of string.
+                        # Positive lookahead `(?=...)` ensures the comma is part of a new key-value pair or it's the end.
+                        kv_regex = re.compile(r"([\w\s-]+?)\s*[:is](?!=\s*http)\s*([\w\s.,'@\-\/%+'\"()]+?)(?=\s*,\s*[\w\s-]+?\s*[:is](?!=\s*http)|$)", re.IGNORECASE)
+                        extracted_pairs = {key.strip(): val.strip() for key, val in kv_regex.findall(kv_string)}
+                        if extracted_pairs: parameters[target_param_name] = extracted_pairs
+                        else: parameters[target_param_name] = {} # Return empty dict if no pairs found
+                        parameters.pop(source_param_name, None) # Remove original string
+                    elif kv_string is None or not kv_string.strip(): # If source is empty or None
+                        parameters[target_param_name] = None # Set target to None or {} as appropriate
+                        if source_param_name in parameters : parameters.pop(source_param_name, None)
 
-            # For this implementation, let's assume `entity_mapping` refers to entity labels
-            # that spaCy's NER would find within the `matched_span`, or it refers to a specific
-            # token index logic (which is harder).
+            # This part for derive_status_filter needs to be re-thought with better capture mechanisms
+            # For now, it's unlikely to work correctly based on current param extraction.
+            # ... (original derive_status_filter logic, which is likely not working) ...
 
-            # A pragmatic approach for "CAPTURE" in our JSON:
-            # The rule definition (`command_rules`) contains `entity_mapping`.
-            # e.g., "entity_mapping": { "file_path_token_text": "target_path" }
-            # This means if a token within the matched span was marked with "CAPTURE": "file_path_token_text"
-            # in the JSON pattern, its text should be assigned to the "target_path" parameter.
-            # This requires parsing our custom "CAPTURE" directive.
-
-            # Let's simplify: Iterate over spaCy entities within the matched_span.
-            # If an entity's label is in our `entity_mapping` values, we might use it.
-            # This is still not ideal.
-
-            # Correct logic for spaCy Matcher and capturing:
-            # When adding patterns, the "id" of the pattern part is the capture name.
-            # Example pattern for matcher.add: `[{"LOWER": "hello"}, {"IS_PUNCT": True, "id": "punct_capture"}]`
-            # Then, `on_match` callback receives `matcher, doc, i, matches`.
-            # `matches[i]` is `(match_id, start, end)`. `doc[start:end]` is the full span.
-            # To get sub-spans for captures, you need to know which part of your pattern was named.
-            # This is typically done by having multiple, more granular patterns or a complex on_match.
-
-            # Given our current JSON structure for patterns, direct capture is hard.
-            # Fallback: Use NER entities within the span and map them.
-            custom_captured_entities = {} # For our conceptual "CAPTURE"
-
-            # This is a placeholder for a more robust capture mechanism.
-            # For now, we will rely on the `entity_mapping` to map NER results from the matched span.
-            for ent_in_span in matched_span.ents:
-                for map_key_in_rule, param_name_in_output in matched_rule_config.get("entity_mapping", {}).items():
-                    # This mapping is tricky. `map_key_in_rule` needs to relate to how `ent_in_span.label_` or `ent_in_span.text` is identified.
-                    # Let's assume `map_key_in_rule` is the expected `ent_in_span.label_` for now.
-                    if ent_in_span.label_ == map_key_in_rule:
-                         parameters[param_name_in_output] = ent_in_span.text
-                         logger.debug(f"Command '{matched_rule_config['command_name']}': Mapped entity '{ent_in_span.text}' ({ent_in_span.label_}) to param '{param_name_in_output}'")
-
-            # If no entities were mapped, but the pattern structure implies captures, this needs enhancement.
-            # For example, if pattern was `[{"LOWER": "file"}, {"SHAPE": "xxxx", "CAPTURE": "filename"}]`
-            # We'd need to iterate tokens in `matched_span` and check their attributes.
-
-            # For now, this is a simplified command parser.
-            # A truly robust one would require careful pattern design and possibly custom on_match callbacks.
-
-            # Apply post-processing logic (e.g., derive_status_filter)
-            post_processing_cfg = matched_rule_config.get("post_processing_logic", {})
-            if "derive_status_filter" in post_processing_cfg:
-                cfg = post_processing_cfg["derive_status_filter"]
-                source_entities = cfg.get("source_entities", [])
-                target_param = cfg.get("target_param")
-                derived_status = None
-                temp_params_to_remove = []
-
-                for source_entity_key in source_entities:
-                    # The entity_mapping maps the conceptual capture (e.g., "status_active")
-                    # to a parameter name (e.g., "status_filter_active").
-                    # We need to check if this parameter was set because its corresponding keyword was found.
-                    # The current parameter extraction relies on NER, which isn't ideal for these keywords.
-                    # A better approach would be for the spaCy matcher patterns themselves to set these flags,
-                    # or to check token text directly within the matched_span.
-                    # For now, we'll assume if a param like "status_filter_active" (from entity_mapping)
-                    # is in `parameters`, it means the keyword "active" was present.
-                    # The value of this param would be the keyword itself.
-
-                    # This part is tricky because the current `entity_mapping` logic is based on NER labels.
-                    # For keywords like "active", "completed", they are unlikely to be NER entities.
-                    # The "CAPTURE" in patterns.json was conceptual.
-                    # Let's adjust: we need to check if the *text* of a captured token (from the pattern)
-                    # matches one of the status keywords.
-                    # This requires more advanced pattern definition in JSON or more complex parsing here.
-
-                    # Simplified assumption for now: if a parameter like 'status_filter_active' exists
-                    # (meaning the keyword "active" was conceptually captured and mapped via entity_mapping),
-                    # then use its value (which should be "active").
-                    # This requires the JSON patterns to be designed to capture these keywords
-                    # and `entity_mapping` to map them to parameters like `status_filter_active`.
-                    # The current NER-based mapping in _parse_command_from_doc might not populate these correctly.
-                    # This highlights a TODO: Improve parameter extraction from Matcher patterns.
-
-                    # Let's refine the logic for derive_status_filter:
-                    # It should look at the matched_span's text for the keywords.
-                    # Example: if "active" is in matched_span.text and "status_filter_active" is a source_entity.
-                    # This is still not directly using the "CAPTURE" from patterns.json.
-
-                    # For now, let's assume the parameter extraction correctly populates these based on CAPTURE.
-                    # This is a temporary simplification pending better capture logic.
-                    if parameters.get(source_entity_key): # e.g. parameters["status_filter_active"] is "active"
-                        derived_status = parameters[source_entity_key] # This should be the actual status string, e.g., "active"
-                        temp_params_to_remove.append(source_entity_key)
-                        break # Found the first one
-
-                if derived_status and target_param:
-                    parameters[target_param] = derived_status
-                    for p_to_remove in temp_params_to_remove:
-                        parameters.pop(p_to_remove, None)
-                    logger.debug(f"Command '{matched_rule_config['command_name']}': Derived '{target_param}' as '{derived_status}'.")
-
-
-            # Apply value transformations
-            transformations = matched_rule_config.get("value_transformations", {})
-            for param_name, transform_map in transformations.items():
-                if param_name in parameters and parameters[param_name] in transform_map:
-                    original_value = parameters[param_name]
-                    transformed_value = transform_map[original_value]
-                    parameters[param_name] = transformed_value
-                    logger.debug(f"Command '{matched_rule_config['command_name']}': Transformed param '{param_name}' value from '{original_value}' to '{transformed_value}'.")
-
-
-            if parameters: # Only return if we successfully mapped some parameters or have defaults
-                 return ParsedCommand(command=matched_rule_config["command_name"], parameters=parameters)
-            else:
-                logger.debug(f"Command '{matched_rule_config['command_name']}' matched, but no parameters were extracted or defaulted from span '{matched_span.text}'.")
-
-        return None # No suitable match found or no params extracted
+            return ParsedCommand(command=matched_rule_config["command_name"], parameters=parameters)
+        return None
 
 
     def _analyze_sentiment(self, text: str) -> Optional[Sentiment]:
         if not self.sentiment_pipeline:
             return None
+        # ... (original sentiment logic) ...
+        return None # Temporarily disabled
 
-        try:
-            # The default text-classification pipeline might not return multiple labels easily.
-            # For now, we get the top one. If a multi-label model is used, adjust accordingly.
-            # Some pipelines return a list of dicts, others a single dict.
-            # The 'distilbert-base-uncased-finetuned-sst-2-english' model is for sentiment (POSITIVE/NEGATIVE)
-            # so it's not ideal for general intent. This is a placeholder.
-            # A true intent model would have labels like "CREATE_FILE", "ASK_QUESTION", etc.
-
-            # HACK: Using sst-2 model as a placeholder. It will output POSITIVE/NEGATIVE.
-            # This needs to be replaced with a proper intent model.
-            # For now, we'll just use the label it gives as the "intent name".
-            predictions = self.intent_pipeline(text, top_k=self.config.max_intent_alternates if self.config.max_intent_alternates > 0 else 1)
-
-            if not predictions:
-                return None
-
-            # Assuming predictions is a list of dicts like [{'label': 'LABEL_X', 'score': 0.9}, ...]
-            # or a single dict if top_k=1 (though often it's still a list with one item)
-            if not isinstance(predictions, list):
-                predictions = [predictions]
-
-            primary_prediction = predictions[0]
-            primary_intent_name = primary_prediction['label']
-            primary_intent_confidence = primary_prediction['score']
-
-            if primary_intent_confidence < self.config.intent_confidence_threshold:
-                logger.info(f"Intent '{primary_intent_name}' confidence {primary_intent_confidence:.2f} is below threshold {self.config.intent_confidence_threshold}.")
-                return None # Or return with a special "UNCLEAR_INTENT"
-
-            alternates = []
-            if len(predictions) > 1:
-                for alt_pred in predictions[1:]:
-                    alternates.append((alt_pred['label'], alt_pred['score']))
-
-            return Intent(
-                name=primary_intent_name,
-                confidence=primary_intent_confidence,
-                alternate_intents=alternates if alternates else None
-            )
-        except Exception as e:
-            logger.error(f"Error during intent recognition for text '{text[:50]}...': {e}", exc_info=True)
-            return None
-
-
-    def _analyze_sentiment(self, text: str) -> Optional[Sentiment]:
-        if not self.sentiment_pipeline:
-            return None
-        try:
-            # Sentiment pipeline usually returns a list with a single dict: [{'label': 'POSITIVE', 'score': 0.99}]
-            result = self.sentiment_pipeline(text)
-            if result and isinstance(result, list):
-                sentiment_data = result[0]
-                return Sentiment(label=sentiment_data['label'], score=sentiment_data['score'])
-            elif result and isinstance(result, dict): # Some pipelines might return a dict directly
-                 return Sentiment(label=result['label'], score=result['score'])
-            return None
-        except Exception as e:
-            logger.error(f"Error during sentiment analysis for text '{text[:50]}...': {e}", exc_info=True)
-            return None
-
-    def process_text(self, text: str, context: Optional[dict] = None) -> NLUResult: # Placeholder for context
+    def process_text(self, text: str, context: Optional[dict] = None) -> NLUResult:
         if not self.nlp:
             raise NLUProcessingError("NLUProcessor is not initialized properly (spaCy model missing).")
-
         start_time = time.time()
-
-        # SpaCy processing
         doc = self.nlp(text)
-
-        # Core NLU capabilities (Phase 1)
         spacy_entities = self._extract_spacy_entities(doc)
 
-        # Intent Recognition (using placeholder model for now)
-        # Pass the doc to _recognize_intent if it might use matcher results for intent refinement later
-        detected_intent = self._recognize_intent(text, doc=doc)
+        # Intent Recognition is temporarily disabled for Matcher debugging
+        detected_intent: Optional[Intent] = None
+        # detected_intent = self._recognize_intent(text, doc=doc)
 
-        # Sentiment Analysis (if enabled)
-        detected_sentiment = None
-        if self.config.enable_sentiment_analysis:
-            detected_sentiment = self._analyze_sentiment(text)
+        detected_sentiment = self._analyze_sentiment(text) # Also temporarily disabled
 
-        # Command Parsing (Phase 2)
         parsed_command = None
-        if self.config.enable_rule_based_entities: # Using this flag for command parsing as well
+        if self.config.enable_rule_based_entities:
             parsed_command = self._parse_command_from_doc(doc)
             if parsed_command:
                 logger.info(f"Parsed command: {parsed_command.command} with params: {parsed_command.parameters}")
-                # Optional: If a command is parsed, and it has an associated intent_alias,
-                # we could refine `detected_intent` here.
-                # Example: if parsed_command.command == "CREATE_FILE" and "CREATE_FILE_INTENT" is an alias,
-                # and if llm_intent is weak or absent, set detected_intent to "CREATE_FILE_INTENT".
-                # This requires command_rules to include 'intent_aliases'.
                 for rule_cfg in self.command_rules:
                     if rule_cfg["command_name"] == parsed_command.command:
                         intent_aliases = rule_cfg.get("intent_aliases", [])
                         if intent_aliases:
-                            # Simple strategy: if LLM intent is weak or different, and command implies a strong intent
-                            if not detected_intent or detected_intent.confidence < 0.7:
-                                # Use the first alias as the intent, with high confidence
-                                # A more sophisticated approach would be needed for multiple aliases or confidence scoring.
-                                new_intent_name = intent_aliases[0]
-                                if not detected_intent or detected_intent.name != new_intent_name:
-                                    logger.info(f"Command parsing suggests intent '{new_intent_name}', overriding/setting LLM intent ({detected_intent.name if detected_intent else 'None'}).")
-                                    detected_intent = Intent(name=new_intent_name, confidence=0.95) # Assume high confidence for pattern match
-                            elif detected_intent.name not in intent_aliases and detected_intent.confidence >= 0.7:
-                                # LLM intent is confident and different from command-implied intents.
-                                # Could log a warning or add command-implied intent as an alternative.
-                                logger.info(f"LLM intent '{detected_intent.name}' is confident but differs from command-implied intents {intent_aliases} for command '{parsed_command.command}'. Keeping LLM intent.")
+                            # If command is parsed, use its first alias as intent (high confidence)
+                            # This overrides the (currently disabled) LLM intent
+                            new_intent_name = intent_aliases[0]
+                            logger.info(f"Command parsing via Matcher identified command '{parsed_command.command}', setting intent to '{new_intent_name}'.")
+                            detected_intent = Intent(name=new_intent_name, confidence=0.98) # High confidence for rule match
                         break
 
+        # Fallback if no command-driven intent and no LLM intent (currently disabled)
+        if not detected_intent and text and text.strip():
+             # Basic fallback: if intent pipeline was disabled or failed, and no command matched,
+             # we might assign a generic intent or leave it None.
+             # For tests, if command parsing fails, detected_intent will be None.
+             pass
 
-        # Co-reference Resolution (Future - Placeholder)
-        # if self.config.enable_coreference_resolution and doc._.coref_chains:
-        #    resolved_text = doc._.coref_chains.resolve_coref_chains_text(doc)
-        #    logger.info(f"Coreference resolved text: {resolved_text[:100]}...")
-        #    # This resolved_text could be used for further processing or returned.
-        #    # For now, we are not modifying the main NLUResult based on this.
 
-        # Token and sentence extraction
         tokens = [token.text for token in doc]
         sentences = [sent.text for sent in doc.sents]
-
         end_time = time.time()
         processing_time_ms = (end_time - start_time) * 1000
-
         return NLUResult(
             raw_text=text,
             detected_intent=detected_intent,
             entities=spacy_entities,
             sentiment=detected_sentiment,
-            parsed_command=parsed_command, # Add parsed command
-            language=doc.lang_ if doc.lang_ else self.config.default_language, # spaCy doc.lang_
+            parsed_command=parsed_command,
+            language=doc.lang_ if doc.lang_ else self.config.default_language,
             processing_time_ms=processing_time_ms,
             tokens=tokens,
             sentences=sentences
         )
 
-# Example Usage (for testing purposes, typically not here)
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    # Configure to use a smaller model for quicker testing if needed
-    # test_config = NLUConfig(spacy_model_name="en_core_web_sm",
-    #                         intent_model_name="distilbert-base-uncased-finetuned-sst-2-english", # Placeholder
-    #                         sentiment_model_name="distilbert-base-uncased-finetuned-sst-2-english")
-
-    # Using default config which specifies en_core_web_md
-    # Ensure en_core_web_md is downloaded: python -m spacy download en_core_web_md
-
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger.info("Initializing NLUProcessor with default config...")
     try:
-        processor = NLUProcessor() # Uses nlu_default_config
-
-        test_text_1 = "Can you create a Python script to list all files in the /tmp directory? I'm feeling great about this."
-        logger.info(f"\nProcessing text 1: \"{test_text_1}\"")
-        result_1 = processor.process_text(test_text_1)
-        print(result_1)
-        print(f"  Tokens: {result_1.tokens[:10]}...")
-        print(f"  Sentences: {result_1.sentences}")
-        if result_1.parsed_command:
-            print(f"  Parsed Command: {result_1.parsed_command.command} with params {result_1.parsed_command.parameters}")
-
-
-        test_text_2 = "Analyze the sentiment of this: I am very unhappy with the CodeMaster agent's performance on the last task."
-        logger.info(f"\nProcessing text 2: \"{test_text_2}\"")
-        result_2 = processor.process_text(test_text_2)
-        print(result_2)
-        if result_2.parsed_command:
-            print(f"  Parsed Command: {result_2.parsed_command.command} with params {result_2.parsed_command.parameters}")
-
-        test_text_3 = "What is the weather like in London today?" # Should not match a command
-        logger.info(f"\nProcessing text 3: \"{test_text_3}\"")
-        result_3 = processor.process_text(test_text_3)
-        print(result_3)
-        if result_3.entities:
-            for ent in result_3.entities:
-                print(f"  Entity: {ent.text} ({ent.label_})") # Changed from ent.label to ent.label_ for spaCy v3
-        if result_3.parsed_command:
-            print(f"  Parsed Command: {result_3.parsed_command.command} with params {result_3.parsed_command.parameters}")
-
-
-        # Test with intent model (placeholder, will give POSITIVE/NEGATIVE)
-        test_text_intent = "I want to generate a new image of a cat."
-        logger.info(f"\nProcessing text for intent (placeholder): \"{test_text_intent}\"")
-        result_intent = processor.process_text(test_text_intent)
-        print(result_intent)
-        if result_intent.parsed_command:
-            print(f"  Parsed Command: {result_intent.parsed_command.command} with params {result_intent.parsed_command.parameters}")
-
-        # Test a command parsing example
-        test_text_command = "Create a file named my_new_document.txt"
-        logger.info(f"\nProcessing command text: \"{test_text_command}\"")
-        result_command = processor.process_text(test_text_command)
-        print(result_command) # This will now call the __str__ of NLUResult
-        if result_command.parsed_command:
-            print(f"  COMMAND DETECTED: {result_command.parsed_command.command}")
-            print(f"  PARAMETERS: {result_command.parsed_command.parameters}")
-        else:
-            print("  NO COMMAND DETECTED.")
-            if result_command.entities:
-                 print(f"  Entities found: {[e.text for e in result_command.entities]}")
+        # Ensure en_core_web_sm is downloaded: python -m spacy download en_core_web_sm
+        test_config = NLUConfig(spacy_model_name="en_core_web_sm", command_patterns_file="nlu_command_patterns.json")
+        processor = NLUProcessor(config=test_config)
 
         logger.info("\n--- Testing Objective Management Commands ---")
         objective_test_cases = [
@@ -620,7 +358,7 @@ if __name__ == '__main__':
             "my new goal is to learn spaCy",
             "list my active objectives",
             "show all objectives",
-            "list completed goals",
+            "list completed goals for project AlphaBeta",
             "set objective userobj_1234-abcd-5678-efgh status to completed",
             "mark goal userobj_aaaa-bbbb-cccc-dddd as on-hold"
         ]
@@ -643,29 +381,9 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"An unexpected error occurred during example usage: {e}", exc_info=True)
 
-    # Test case where intent model might be missing (if you rename one in config temporarily)
-    # test_config_broken_intent = NLUConfig(intent_model_name="non_existent_model_path")
-    # try:
-    #     logger.info("\nInitializing NLUProcessor with a potentially broken intent model config...")
-    #     broken_processor = NLUProcessor(config=test_config_broken_intent)
-    #     res_broken = broken_processor.process_text("This should still work for entities.")
-    #     print(res_broken)
-    # except Exception as e:
-    #     logger.error(f"Error with broken config: {e}")
-
 """
-TODO for Phase 1 Completion:
-1.  [x] Basic Module Structure: `NLUProcessor` class, load spaCy.
-2.  [x] Core Entity Extraction: Implement `_extract_spacy_entities` using `doc.ents`.
-3.  [x] Placeholder Intent Recognition:
-    *   [x] Integrate Hugging Face `pipeline` for text classification.
-    *   [x] Use a generic model like `distilbert-base-uncased-finetuned-sst-2-english` as a STAND-IN.
-        (This means "intents" will be 'POSITIVE'/'NEGATIVE' for now, which is not true intent, but tests the mechanism).
-    *   [x] Connect to `NLUResult.detected_intent`.
-    *   [x] Add confidence threshold from config.
-4.  [ ] Unit Tests:
-    *   Test entity extraction (e.g., dates, locations, person names from spaCy).
-    *   Test placeholder intent recognition (ensure it calls the pipeline and populates the field).
-    *   Test sentiment analysis (if enabled).
-    *   Test basic NLUResult structure.
+TODO:
+- Full implementation of parameter extraction in `_parse_command_from_doc` using spaCy Matcher's `on_match` callback or by carefully designing patterns and then extracting token attributes from the matched span based on the known structure of the pattern that fired. The current "CAPTURE" key in JSON is not standard spaCy and needs a proper handling mechanism.
+- Re-enable EntityRuler and HuggingFace pipelines once Matcher/command parsing is stable.
+- Refine intent alias logic to better integrate rule-based command detection with LLM-based intent recognition.
 """

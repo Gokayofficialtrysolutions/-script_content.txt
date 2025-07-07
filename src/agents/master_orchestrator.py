@@ -88,6 +88,11 @@ class Agent:
 
 
 class TerminusOrchestrator:
+   # TODO: Implement a more robust user identification and session management system.
+   # This could involve user accounts, session tokens, etc.
+   # For now, a hardcoded default user ID is used for features like user objectives.
+   DEFAULT_USER_IDENTIFIER = "local_user_default_01"
+
    def __init__(self):
        self.agents: List[Agent] = []
        self.service_definitions: Dict[Tuple[str, str], AgentServiceDefinition] = {}
@@ -1890,8 +1895,8 @@ class TerminusOrchestrator:
 
            # --- Retrieve and Format Active User Objectives ---
            active_objectives_string = "No specific long-term objectives are currently active."
-           # TODO: Replace "default_user" with actual user_identifier when available
-           current_user_id_for_objectives = "default_user"
+       # Use the defined default user identifier for now
+       current_user_id_for_objectives = self.DEFAULT_USER_IDENTIFIER
            try:
                objectives_result = await self._service_masterplanner_list_user_objectives(
                    params={"user_identifier": current_user_id_for_objectives, "status_filter": "active"},
