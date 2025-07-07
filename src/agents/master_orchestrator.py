@@ -701,6 +701,21 @@ class TerminusOrchestrator:
                except Exception as e_obj_parse:
                    print(f"{handler_id} WARNING: Could not parse UserObjective for KB ID '{kb_id}'. Using raw JSON string. Error: {e_obj_parse}")
                    text_for_analysis = doc_json_string # Fallback
+               # KG node metadata for UserObjective
+               kg_node_metadata = {
+                   "user_identifier": objective_rec.user_identifier,
+                   "status": objective_rec.status,
+                   "priority": objective_rec.priority,
+                   "created_utc": objective_rec.created_timestamp_utc,
+                   "last_updated_utc": objective_rec.last_updated_timestamp_utc
+               }
+               if objective_rec.related_project_id:
+                   kg_node_metadata["related_project_id"] = objective_rec.related_project_id
+               # The actual KG node creation and linking to keywords/topics will happen later in this handler
+               # after text_for_analysis is processed by ContentAnalysisAgent.
+               # We pass db_schema_type (which is "UserObjective") to add_node later.
+               # The kb_id (which is objective_rec.objective_id) is used as node_id.
+
            elif db_schema_type == "CodeExplanation": # Code explanations might be better served by their own keywords
                 print(f"{handler_id} INFO: Skipping generic keyword/topic analysis for CodeExplanation schema '{db_schema_type}'. Assumed to have its own keywords.")
                 return
@@ -779,7 +794,32 @@ class TerminusOrchestrator:
                    # Also update Knowledge Graph with keywords and topics
                    if self.kg_instance:
                        # Ensure KB item node exists
-                       self.kg_instance.add_node(node_id=kb_id, node_type=db_schema_type or "GenericContent", content_preview=text_for_analysis[:100])
+                       # For UserObjective, we want specific metadata in the KG node.
+                       node_metadata_for_kg = None
+                       if db_schema_type == "UserObjective":
+                           try:
+                               # Re-parse to get the full object if text_for_analysis was a summary
+                               obj_rec_for_kg_meta = UserObjectiveDC.from_json_string(doc_json_string)
+                               node_metadata_for_kg = {
+                                   "user_identifier": obj_rec_for_kg_meta.user_identifier,
+                                   "status": obj_rec_for_kg_meta.status,
+                                   "priority": obj_rec_for_kg_meta.priority,
+                                   "created_utc": obj_rec_for_kg_meta.created_timestamp_utc,
+                                   "last_updated_utc": obj_rec_for_kg_meta.last_updated_timestamp_utc
+                               }
+                               if obj_rec_for_kg_meta.related_project_id:
+                                   node_metadata_for_kg["related_project_id"] = obj_rec_for_kg_meta.related_project_id
+                               if obj_rec_for_kg_meta.key_details:
+                                   node_metadata_for_kg["key_details"] = obj_rec_for_kg_meta.key_details
+                           except Exception as e_kg_meta_parse:
+                               print(f"{handler_id} WARNING: Could not parse UserObjectiveDC for KG metadata population for node {kb_id}. Error: {e_kg_meta_parse}")
+
+                       self.kg_instance.add_node(
+                           node_id=kb_id, # kb_id is the objective_id for UserObjectiveDC
+                           node_type=db_schema_type or "GenericContent",
+                           content_preview=text_for_analysis[:150], # Use a slightly longer preview for KG
+                           metadata=node_metadata_for_kg # Add specific metadata for UserObjective nodes
+                       )
 
                        if extracted_keywords:
                            for kw in extracted_keywords.split(','):
